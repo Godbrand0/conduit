@@ -54,7 +54,7 @@ contract DeployReceiveAndSwap is Script {
         revert("no config for this chain");
     }
 
-    function run() external {
+    function run() external virtual {
         ChainConfig memory c = config();
         vm.startBroadcast();
         ReceiveAndSwap ras =

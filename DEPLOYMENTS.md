@@ -3,7 +3,22 @@
 All transactions below are verifiable on public testnet explorers.
 Deployer/relayer: `0x6dC4F7e7dC254777B8301eF3f89dD7757740c5f7`
 
-## Contracts
+## Contracts — v2 (current)
+
+v2 executors add in-swap USDC refunds (to the recipient in the attested
+hookData, so refunds survive contract-initiated burns) and `amountIn = 0` =
+"swap all minted USDC". SwapAndBurn is the source-side half: native ETH (or
+any ERC20) → USDC → CCTP burn with hook, in one transaction.
+
+| Contract | Chain | Address | Deploy tx |
+|---|---|---|---|
+| ReceiveAndSwap v2 | Arbitrum Sepolia | [`0x9B6aaDaEeD2cAF2B3b26C62aA5dEaCcB8052F40B`](https://sepolia.arbiscan.io/address/0x9B6aaDaEeD2cAF2B3b26C62aA5dEaCcB8052F40B) | [`0x7b09b402…cd2f7d`](https://sepolia.arbiscan.io/tx/0x7b09b402d73aea6b0e21bb0f8daa683b616fbb10b3ff157214df707252cd2f7d) |
+| ReceiveAndSwap v2 | Base Sepolia | [`0x86986974E1B45Dd370AD90Fe8747e86C355b0866`](https://sepolia.basescan.org/address/0x86986974E1B45Dd370AD90Fe8747e86C355b0866) | [`0x1903b5f4…4e6f17`](https://sepolia.basescan.org/tx/0x1903b5f49c75e0ca92ec83f3939259aaf7b0d09093e84f9d87ed0d6e1d4e6f17) |
+| ReceiveAndSwap v2 | Ethereum Sepolia | [`0x226EC562076549FdD16ecaaF437CD77E49D102c5`](https://sepolia.etherscan.io/address/0x226EC562076549FdD16ecaaF437CD77E49D102c5) | [`0x60d8e9ae…2e2a26`](https://sepolia.etherscan.io/tx/0x60d8e9ae71a35059f6db999ac65065946e4ebc791d9b7aa0eb341054ed2e2a26) |
+| ReceiveAndSwap v2 | OP Sepolia | [`0xAead88469c8DBdA0efd12c6993eDCb2F171D8203`](https://sepolia-optimism.etherscan.io/address/0xAead88469c8DBdA0efd12c6993eDCb2F171D8203) | [`0x66cd3411…58f75d`](https://sepolia-optimism.etherscan.io/tx/0x66cd341153d017bae4cee703263f3c0e6196ffeb286aa3f5c1f47beadd58f75d) |
+| **SwapAndBurn** | Base Sepolia | [`0x9bF592B913BB735d1e4fed5c5B5a6073B9b4E62E`](https://sepolia.basescan.org/address/0x9bF592B913BB735d1e4fed5c5B5a6073B9b4E62E) | [`0x3063fdfe…9bf589`](https://sepolia.basescan.org/tx/0x3063fdfe2c0ab645783d30aed00b319b09a6b7a2fe5f1bef78663868a69bf589) |
+
+## Contracts — v1 (historical, superseded by v2)
 
 ### ReceiveAndSwap — Arbitrum Sepolia
 
@@ -89,3 +104,20 @@ relay tx; this pool prices ETH unrealistically). Executor USDC after: 0.
 | Relay + mint + swap + ETH delivery | OP Sepolia | [`0x71c53980e87fd80ab5c6eb39aaa38896258ba3e1d1c63a64ce48e42f447688eb`](https://sepolia-optimism.etherscan.io/tx/0x71c53980e87fd80ab5c6eb39aaa38896258ba3e1d1c63a64ce48e42f447688eb) |
 
 Result: **0.000562537150249797 native ETH** delivered. End-to-end ≈ 20s.
+
+### #5 — FULL NATIVE-TO-NATIVE: Base Sepolia ETH → Arbitrum Sepolia ETH (2026-07-27)
+
+The complete Conduit product loop, one user signature end to end:
+`swapAndBurnNative` swapped 0.004 native ETH → USDC on Base's Uniswap V3 and
+burned it via `depositForBurnWithHook` **in a single transaction**; the relay
+minted on Arbitrum and swapped all minted USDC (`amountIn = 0`) to native ETH.
+Run with `scripts/e2e-native.ts` against v2 contracts.
+
+| Step | Chain | Tx |
+|---|---|---|
+| Swap (ETH→USDC) + CCTP burn, one tx | Base Sepolia | [`0xaeb0313c2d0c80c62c3a00442a4559f328c783917082da9894a0937ccc0022e3`](https://sepolia.basescan.org/tx/0xaeb0313c2d0c80c62c3a00442a4559f328c783917082da9894a0937ccc0022e3) |
+| Relay + mint + swap (USDC→ETH), one tx | Arbitrum Sepolia | [`0xc5f61b6de30f16da051537a3867b1c6e1dfde89c803335e1bdbeb3a25b64d4a6`](https://sepolia.arbiscan.io/tx/0xc5f61b6de30f16da051537a3867b1c6e1dfde89c803335e1bdbeb3a25b64d4a6) |
+
+Result: **0.110835143317079112 native ETH** delivered on Arbitrum.
+(The apparent gain is the two testnet pools' arbitrary prices disagreeing —
+mainnet pools arbitrage this away.)

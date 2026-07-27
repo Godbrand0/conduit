@@ -187,14 +187,45 @@ contract ReceiveAndSwapTest is Test {
         assertEq(usdc.balanceOf(address(ras)), 0, "no USDC left in contract");
     }
 
-    function test_slippageFailure_refundsUsdcToSender() public {
-        // minOut higher than the router can deliver → swap reverts → refund path
+    function test_slippageFailure_refundsUsdcToRecipient() public {
+        // minOut higher than the router can deliver → swap caught in-function →
+        // USDC refunded to the recipient from the attested hookData (works even
+        // when messageSender is a source-chain contract)
         bytes memory message = _buildMessage(address(ras), _swapToNativeHook(0, type(uint256).max));
 
         ras.relayAndExecute(message, hex"");
 
         assertEq(user.balance, 0, "no ETH delivered");
-        assertEq(usdc.balanceOf(sourceSender), MINTED, "USDC refunded to source sender");
+        assertEq(usdc.balanceOf(user), MINTED, "USDC refunded to recipient");
+        assertEq(usdc.balanceOf(address(ras)), 0, "no USDC stranded");
+    }
+
+    function test_amountInZero_swapsFullMintedBalance() public {
+        uint256 expectedEth = (MINTED * router.RATE()) / 1e6;
+        // amountIn = 0 → "swap everything" (contract-initiated burns can't know
+        // the minted amount at sign time)
+        bytes memory data =
+            abi.encodeCall(ReceiveAndSwap.swapUsdcToNative, (0, uint24(500), expectedEth, user));
+        bytes memory message =
+            _buildMessage(address(ras), abi.encode(address(ras), data, uint256(0)));
+
+        ras.relayAndExecute(message, hex"");
+
+        assertEq(user.balance, expectedEth, "full minted balance swapped");
+        assertEq(usdc.balanceOf(address(ras)), 0, "no USDC left");
+    }
+
+    function test_malformedHookTarget_refundsToMessageSender() public {
+        // Unknown selector on the executor → hook call fails → last-resort
+        // refund to messageSender
+        bytes memory message = _buildMessage(
+            address(ras),
+            abi.encode(address(ras), abi.encodeWithSelector(bytes4(0xdeadbeef)), uint256(0))
+        );
+
+        ras.relayAndExecute(message, hex"");
+
+        assertEq(usdc.balanceOf(sourceSender), MINTED, "refunded to messageSender");
         assertEq(usdc.balanceOf(address(ras)), 0, "no USDC stranded");
     }
 

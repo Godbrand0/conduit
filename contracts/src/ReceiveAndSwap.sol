@@ -50,6 +50,7 @@ contract ReceiveAndSwap {
     event HookFailed(address indexed refundTo, uint256 usdcRefunded);
     event NoHookRefund(address indexed refundTo, uint256 usdcRefunded);
     event SwapDelivered(address indexed recipient, address indexed tokenOut, uint256 amountOut);
+    event SwapRefunded(address indexed recipient, uint256 usdcRefunded);
 
     modifier nonReentrant() {
         if (_lock != 1) revert Reentrancy();
@@ -122,14 +123,21 @@ contract ReceiveAndSwap {
     }
 
     /// @notice Hook target: swap USDC for the chain's native token via Uniswap V3
-    /// and deliver it to `recipient`. Reverts on slippage; relayAndExecute turns
-    /// that revert into a USDC refund.
+    /// and deliver it to `recipient`.
+    /// @param amountIn USDC to swap; 0 means the contract's full balance — used by
+    /// contract-initiated burns (SwapAndBurn) where the minted amount isn't known
+    /// at sign time.
+    /// @dev Never reverts on swap failure: slippage refunds USDC straight to
+    /// `recipient` (whose address is part of the attested hookData), so refunds
+    /// work even when the burn's messageSender is a source-chain contract. If the
+    /// recipient can't receive ETH, WETH is delivered instead.
     function swapUsdcToNative(uint256 amountIn, uint24 poolFee, uint256 minOut, address recipient)
         external
         onlySelf
     {
+        if (amountIn == 0) amountIn = usdc.balanceOf(address(this));
         usdc.approve(address(swapRouter), amountIn);
-        uint256 wethOut = swapRouter.exactInputSingle(
+        try swapRouter.exactInputSingle(
             ISwapRouter02.ExactInputSingleParams({
                 tokenIn: address(usdc),
                 tokenOut: address(weth),
@@ -139,15 +147,26 @@ contract ReceiveAndSwap {
                 amountOutMinimum: minOut,
                 sqrtPriceLimitX96: 0
             })
-        );
-        weth.withdraw(wethOut);
-        (bool sent,) = recipient.call{value: wethOut}("");
-        if (!sent) revert NativeSendFailed();
-        emit SwapDelivered(recipient, address(0), wethOut);
+        ) returns (uint256 wethOut) {
+            weth.withdraw(wethOut);
+            (bool sent,) = recipient.call{value: wethOut}("");
+            if (sent) {
+                emit SwapDelivered(recipient, address(0), wethOut);
+            } else {
+                weth.deposit{value: wethOut}();
+                weth.transfer(recipient, wethOut);
+                emit SwapDelivered(recipient, address(weth), wethOut);
+            }
+        } catch {
+            usdc.approve(address(swapRouter), 0);
+            usdc.transfer(recipient, amountIn);
+            emit SwapRefunded(recipient, amountIn);
+        }
     }
 
     /// @notice Hook target: swap USDC for an ERC20 via Uniswap V3, delivered
-    /// directly to `recipient` by the router.
+    /// directly to `recipient` by the router. Same 0-means-all and refund
+    /// semantics as swapUsdcToNative.
     function swapUsdcToToken(
         uint256 amountIn,
         address tokenOut,
@@ -155,8 +174,9 @@ contract ReceiveAndSwap {
         uint256 minOut,
         address recipient
     ) external onlySelf {
+        if (amountIn == 0) amountIn = usdc.balanceOf(address(this));
         usdc.approve(address(swapRouter), amountIn);
-        uint256 amountOut = swapRouter.exactInputSingle(
+        try swapRouter.exactInputSingle(
             ISwapRouter02.ExactInputSingleParams({
                 tokenIn: address(usdc),
                 tokenOut: tokenOut,
@@ -166,8 +186,13 @@ contract ReceiveAndSwap {
                 amountOutMinimum: minOut,
                 sqrtPriceLimitX96: 0
             })
-        );
-        emit SwapDelivered(recipient, tokenOut, amountOut);
+        ) returns (uint256 amountOut) {
+            emit SwapDelivered(recipient, tokenOut, amountOut);
+        } catch {
+            usdc.approve(address(swapRouter), 0);
+            usdc.transfer(recipient, amountIn);
+            emit SwapRefunded(recipient, amountIn);
+        }
     }
 
     /// @notice Recover tokens stranded by a receiveMessage that bypassed
