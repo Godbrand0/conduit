@@ -26,23 +26,38 @@ contract SwapAndBurn {
     IERC20 public immutable usdc;
     ISwapRouter02 public immutable swapRouter;
     IWETH9 public immutable weth;
+    address public immutable owner;
+
+    /// @notice Conduit protocol fee in basis points, skimmed from the USDC
+    /// output of the source swap before burning. Accumulates in this contract
+    /// as treasury; withdrawable by the owner.
+    uint256 public constant FEE_BPS = 5; // 0.05%
 
     error NothingSent();
     error UsdcBelowFee();
+    error NotOwner();
 
     event BurnInitiated(
         address indexed sender,
         address indexed tokenIn,
         uint256 amountIn,
         uint256 usdcBurned,
+        uint256 conduitFee,
         uint32 destinationDomain
     );
+    event FeesWithdrawn(address indexed to, uint256 amount);
+
+    modifier onlyOwner() {
+        if (msg.sender != owner) revert NotOwner();
+        _;
+    }
 
     constructor(address tokenMessenger_, address usdc_, address swapRouter_, address weth_) {
         tokenMessenger = ITokenMessengerV2(tokenMessenger_);
         usdc = IERC20(usdc_);
         swapRouter = ISwapRouter02(swapRouter_);
         weth = IWETH9(weth_);
+        owner = msg.sender;
     }
 
     /// @notice Swap native ETH → USDC and burn it to `destinationDomain` with a
@@ -57,11 +72,11 @@ contract SwapAndBurn {
         uint256 maxFee,
         uint32 minFinalityThreshold,
         bytes calldata hookData
-    ) external payable returns (uint256 usdcOut) {
+    ) external payable returns (uint256 usdcBurned) {
         if (msg.value == 0) revert NothingSent();
         weth.deposit{value: msg.value}();
         weth.approve(address(swapRouter), msg.value);
-        usdcOut = swapRouter.exactInputSingle(
+        uint256 usdcOut = swapRouter.exactInputSingle(
             ISwapRouter02.ExactInputSingleParams({
                 tokenIn: address(weth),
                 tokenOut: address(usdc),
@@ -72,8 +87,10 @@ contract SwapAndBurn {
                 sqrtPriceLimitX96: 0
             })
         );
-        _burn(usdcOut, destinationDomain, mintRecipient, destinationCaller, maxFee, minFinalityThreshold, hookData);
-        emit BurnInitiated(msg.sender, address(0), msg.value, usdcOut, destinationDomain);
+        uint256 conduitFee = (usdcOut * FEE_BPS) / 10_000;
+        usdcBurned = usdcOut - conduitFee;
+        _burn(usdcBurned, destinationDomain, mintRecipient, destinationCaller, maxFee, minFinalityThreshold, hookData);
+        emit BurnInitiated(msg.sender, address(0), msg.value, usdcBurned, conduitFee, destinationDomain);
     }
 
     /// @notice Swap an ERC20 → USDC and burn, atomically. Caller must approve
@@ -89,10 +106,11 @@ contract SwapAndBurn {
         uint256 maxFee,
         uint32 minFinalityThreshold,
         bytes calldata hookData
-    ) external returns (uint256 usdcOut) {
+    ) external returns (uint256 usdcBurned) {
         if (amountIn == 0) revert NothingSent();
         IERC20(tokenIn).transferFrom(msg.sender, address(this), amountIn);
 
+        uint256 usdcOut;
         if (tokenIn == address(usdc)) {
             usdcOut = amountIn;
         } else {
@@ -109,8 +127,16 @@ contract SwapAndBurn {
                 })
             );
         }
-        _burn(usdcOut, destinationDomain, mintRecipient, destinationCaller, maxFee, minFinalityThreshold, hookData);
-        emit BurnInitiated(msg.sender, tokenIn, amountIn, usdcOut, destinationDomain);
+        uint256 conduitFee = (usdcOut * FEE_BPS) / 10_000;
+        usdcBurned = usdcOut - conduitFee;
+        _burn(usdcBurned, destinationDomain, mintRecipient, destinationCaller, maxFee, minFinalityThreshold, hookData);
+        emit BurnInitiated(msg.sender, tokenIn, amountIn, usdcBurned, conduitFee, destinationDomain);
+    }
+
+    /// @notice Withdraw accumulated Conduit fees (USDC held by this contract).
+    function withdrawFees(address to, uint256 amount) external onlyOwner {
+        usdc.transfer(to, amount);
+        emit FeesWithdrawn(to, amount);
     }
 
     function _burn(

@@ -157,21 +157,44 @@ contract SwapAndBurnTest is Test {
     function test_nativeSwapAndBurn() public {
         uint256 ethIn = 0.01 ether;
         uint256 expectedUsdc = (ethIn * router.RATE()) / 1e18; // 17.7 USDC
+        uint256 expectedFee = (expectedUsdc * sab.FEE_BPS()) / 10_000; // 0.05%
+        uint256 expectedBurn = expectedUsdc - expectedFee;
 
         vm.prank(user);
-        uint256 usdcOut = sab.swapAndBurnNative{value: ethIn}(
+        uint256 usdcBurned = sab.swapAndBurnNative{value: ethIn}(
             expectedUsdc, 3000, 3, EXECUTOR, EXECUTOR, 1_300_000, 1000, HOOK_DATA
         );
 
-        assertEq(usdcOut, expectedUsdc, "swap output");
+        assertEq(usdcBurned, expectedBurn, "burn amount is post-fee");
         assertEq(messenger.calls(), 1, "burn called");
-        assertEq(messenger.amount(), expectedUsdc, "full USDC burned");
+        assertEq(messenger.amount(), expectedBurn, "post-fee USDC burned");
         assertEq(messenger.destinationDomain(), 3);
         assertEq(messenger.mintRecipient(), EXECUTOR, "executor is mintRecipient");
         assertEq(messenger.destinationCaller(), EXECUTOR, "executor is destinationCaller");
         assertEq(messenger.hookData(), HOOK_DATA, "hookData passed through");
-        assertEq(usdc.balanceOf(address(sab)), 0, "no USDC left in contract");
+        assertEq(usdc.balanceOf(address(sab)), expectedFee, "fee retained as treasury");
         assertEq(weth.balanceOf(address(sab)), 0, "no WETH left in contract");
+    }
+
+    function test_feeAccumulatesAndWithdraws() public {
+        vm.startPrank(user);
+        sab.swapAndBurnNative{value: 0.01 ether}(0, 3000, 3, EXECUTOR, EXECUTOR, 1_300_000, 1000, HOOK_DATA);
+        sab.swapAndBurnNative{value: 0.01 ether}(0, 3000, 3, EXECUTOR, EXECUTOR, 1_300_000, 1000, HOOK_DATA);
+        vm.stopPrank();
+
+        uint256 perSwapFee = ((0.01 ether * router.RATE()) / 1e18) * sab.FEE_BPS() / 10_000;
+        uint256 treasury = usdc.balanceOf(address(sab));
+        assertEq(treasury, perSwapFee * 2, "fees accumulate across swaps");
+
+        // non-owner cannot withdraw
+        vm.prank(user);
+        vm.expectRevert(SwapAndBurn.NotOwner.selector);
+        sab.withdrawFees(user, treasury);
+
+        // owner (this test contract) withdraws
+        sab.withdrawFees(address(0xFEE), treasury);
+        assertEq(usdc.balanceOf(address(0xFEE)), treasury, "owner withdrew fees");
+        assertEq(usdc.balanceOf(address(sab)), 0);
     }
 
     function test_slippage_reverts() public {
@@ -201,13 +224,15 @@ contract SwapAndBurnTest is Test {
         usdc.mint(user, 5e6);
         vm.startPrank(user);
         usdc.approve(address(sab), 5e6);
-        uint256 usdcOut = sab.swapAndBurnToken(
+        uint256 usdcBurned = sab.swapAndBurnToken(
             address(usdc), 5e6, 0, 3000, 6, EXECUTOR, EXECUTOR, 1_300_000, 1000, HOOK_DATA
         );
         vm.stopPrank();
 
-        assertEq(usdcOut, 5e6, "amount passes through unswapped");
-        assertEq(messenger.amount(), 5e6, "burned directly");
+        uint256 fee = (5e6 * sab.FEE_BPS()) / 10_000;
+        assertEq(usdcBurned, 5e6 - fee, "burns post-fee amount, no swap");
+        assertEq(messenger.amount(), 5e6 - fee, "burned directly minus fee");
+        assertEq(usdc.balanceOf(address(sab)), fee, "fee retained");
         assertEq(messenger.destinationDomain(), 6);
     }
 }

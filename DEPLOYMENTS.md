@@ -16,7 +16,11 @@ any ERC20) → USDC → CCTP burn with hook, in one transaction.
 | ReceiveAndSwap v2 | Base Sepolia | [`0x86986974E1B45Dd370AD90Fe8747e86C355b0866`](https://sepolia.basescan.org/address/0x86986974E1B45Dd370AD90Fe8747e86C355b0866) | [`0x1903b5f4…4e6f17`](https://sepolia.basescan.org/tx/0x1903b5f49c75e0ca92ec83f3939259aaf7b0d09093e84f9d87ed0d6e1d4e6f17) |
 | ReceiveAndSwap v2 | Ethereum Sepolia | [`0x226EC562076549FdD16ecaaF437CD77E49D102c5`](https://sepolia.etherscan.io/address/0x226EC562076549FdD16ecaaF437CD77E49D102c5) | [`0x60d8e9ae…2e2a26`](https://sepolia.etherscan.io/tx/0x60d8e9ae71a35059f6db999ac65065946e4ebc791d9b7aa0eb341054ed2e2a26) |
 | ReceiveAndSwap v2 | OP Sepolia | [`0xAead88469c8DBdA0efd12c6993eDCb2F171D8203`](https://sepolia-optimism.etherscan.io/address/0xAead88469c8DBdA0efd12c6993eDCb2F171D8203) | [`0x66cd3411…58f75d`](https://sepolia-optimism.etherscan.io/tx/0x66cd341153d017bae4cee703263f3c0e6196ffeb286aa3f5c1f47beadd58f75d) |
-| **SwapAndBurn** | Base Sepolia | [`0x9bF592B913BB735d1e4fed5c5B5a6073B9b4E62E`](https://sepolia.basescan.org/address/0x9bF592B913BB735d1e4fed5c5B5a6073B9b4E62E) | [`0x3063fdfe…9bf589`](https://sepolia.basescan.org/tx/0x3063fdfe2c0ab645783d30aed00b319b09a6b7a2fe5f1bef78663868a69bf589) |
+| SwapAndBurn (fee-enabled, `FEE_BPS = 5`) | Base Sepolia | [`0xc3Deb7F7Ad5075618e1055EC2aaf27659740F022`](https://sepolia.basescan.org/address/0xc3Deb7F7Ad5075618e1055EC2aaf27659740F022) | — |
+| SwapAndBurn (fee-enabled) | Arbitrum Sepolia | [`0xcEE2b537Ee71c0B4399761537357c1c2B5A5F6Ec`](https://sepolia.arbiscan.io/address/0xcEE2b537Ee71c0B4399761537357c1c2B5A5F6Ec) | — |
+| SwapAndBurn (fee-enabled) | Ethereum Sepolia | [`0x9A732afcA3Fbc0FB9a0dDF677dC1c35549499766`](https://sepolia.etherscan.io/address/0x9A732afcA3Fbc0FB9a0dDF677dC1c35549499766) | — |
+| SwapAndBurn (fee-enabled) | OP Sepolia | [`0x84B1634Ec67d309AEB9DC422F001350e467DCBc8`](https://sepolia-optimism.etherscan.io/address/0x84B1634Ec67d309AEB9DC422F001350e467DCBc8) | — |
+| SwapAndBurn v1 (no fee, superseded) | Base Sepolia | `0x9bF592B913BB735d1e4fed5c5B5a6073B9b4E62E` | [`0x3063fdfe…9bf589`](https://sepolia.basescan.org/tx/0x3063fdfe2c0ab645783d30aed00b319b09a6b7a2fe5f1bef78663868a69bf589) |
 
 ## Contracts — v1 (historical, superseded by v2)
 
@@ -121,3 +125,18 @@ Run with `scripts/e2e-native.ts` against v2 contracts.
 Result: **0.110835143317079112 native ETH** delivered on Arbitrum.
 (The apparent gain is the two testnet pools' arbitrary prices disagreeing —
 mainnet pools arbitrage this away.)
+
+### #6 — Native-to-native WITH 0.05% Conduit fee: Arbitrum → OP Sepolia (2026-07-27)
+
+First swap through the fee-enabled SwapAndBurn, and a third distinct source
+chain. 0.05 native ETH → ~3.14 USDC on Arbitrum's Uniswap; **0.001571 USDC
+(exactly 5 bps) retained in the treasury**; the rest burned and delivered as
+native ETH on OP Sepolia.
+
+| Step | Chain | Tx |
+|---|---|---|
+| Swap + 0.05% fee + burn, one tx | Arbitrum Sepolia | [`0xd967ef21bc4915bd73c2227b57ce5c46550d505b4c6866c9bd2b206d14014849`](https://sepolia.arbiscan.io/tx/0xd967ef21bc4915bd73c2227b57ce5c46550d505b4c6866c9bd2b206d14014849) |
+| Relay + mint + swap, one tx | OP Sepolia | [`0xeac3b54148856e1d09aea600428928d332b9112bac2fdae4bba7a3a3fce79078`](https://sepolia-optimism.etherscan.io/tx/0xeac3b54148856e1d09aea600428928d332b9112bac2fdae4bba7a3a3fce79078) |
+
+Result: **0.001093259470395926 native ETH** delivered on OP Sepolia.
+Treasury balance verifiable on-chain: `USDC.balanceOf(0xcEE2…F6Ec) = 1571`.
