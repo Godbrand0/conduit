@@ -23,6 +23,24 @@ Deployer/relayer: `0x6dC4F7e7dC254777B8301eF3f89dD7757740c5f7`
 | Block | 44706830 |
 | Constructor | MessageTransmitter `0xE737e5cEBEEBa77EFE34D4aa090756590b1CE275`, USDC `0x036CbD53842c5426634e7929541eC2318f3dCF7e`, SwapRouter02 `0x94cC0AaC535CCDB3C01d6787D6413C739ae12bc4`, WETH9 `0x4200000000000000000000000000000000000006` |
 
+### ReceiveAndSwap — Ethereum Sepolia
+
+| | |
+|---|---|
+| Address | [`0xEfC684378828f4B2f9Cd7816037eBa255d50eB1E`](https://sepolia.etherscan.io/address/0xEfC684378828f4B2f9Cd7816037eBa255d50eB1E) |
+| Deploy tx | [`0xcc9ad751748b75667c06f2bf638c944a25e5ab65fa09b6cc4b26d1315625d4d2`](https://sepolia.etherscan.io/tx/0xcc9ad751748b75667c06f2bf638c944a25e5ab65fa09b6cc4b26d1315625d4d2) |
+| Block | 11363912 |
+| Constructor | MessageTransmitter `0xE737e5cEBEEBa77EFE34D4aa090756590b1CE275`, USDC `0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238`, SwapRouter02 `0x3bFA4769FB09eefC5a80d6E87c3B9C650f7Ae48E`, WETH9 `0xfFf9976782d46CC05630D1f6eBAb18b2324d6B14` |
+
+### ReceiveAndSwap — OP Sepolia
+
+| | |
+|---|---|
+| Address | [`0x88a9BcCE07180c85689D3278Ffd7090305C29896`](https://sepolia-optimism.etherscan.io/address/0x88a9BcCE07180c85689D3278Ffd7090305C29896) |
+| Deploy tx | [`0xf65f59cf5542f0cc9c32f81433c5974fa2fc933d5faa078ee26d801567ca0177`](https://sepolia-optimism.etherscan.io/tx/0xf65f59cf5542f0cc9c32f81433c5974fa2fc933d5faa078ee26d801567ca0177) |
+| Block | 46690621 |
+| Constructor | MessageTransmitter `0xE737e5cEBEEBa77EFE34D4aa090756590b1CE275`, USDC `0x5fd84259d66Cd46123540766Be93DFE6D43130D7`, SwapRouter02 `0x94cC0AaC535CCDB3C01d6787D6413C739ae12bc4`, WETH9 `0x4200000000000000000000000000000000000006` |
+
 ## End-to-End Swap Proofs
 
 ### #1 — Base Sepolia → Arbitrum Sepolia (2026-07-27)
@@ -52,3 +70,22 @@ Result: **0.000904235001660061 native ETH** delivered to the recipient.
 End-to-end ≈ 16s. Executor USDC balance after: 0.
 (Output differs from proof #1 only because the two testnet pools carry
 arbitrary, unrelated prices.)
+
+### #3 — Arbitrum Sepolia → Ethereum Sepolia (2026-07-27)
+
+| Step | Chain | Tx |
+|---|---|---|
+| Burn (2.9 USDC) | Arbitrum Sepolia | [`0xcdb63c9153cf90c1ab0fd4fe055a22a250105a28f6d7a33c3070df0b80db6725`](https://sepolia.arbiscan.io/tx/0xcdb63c9153cf90c1ab0fd4fe055a22a250105a28f6d7a33c3070df0b80db6725) |
+| Relay + mint + swap + ETH delivery | Ethereum Sepolia | [`0xcbc91fae208a9a86b0bfad3355c713d33bcbcade8625f525e4ad174afa9775fb`](https://sepolia.etherscan.io/tx/0xcbc91fae208a9a86b0bfad3355c713d33bcbcade8625f525e4ad174afa9775fb) |
+
+Result: 0.000065445930745602 native ETH delivered (`SwapDelivered` event in the
+relay tx; this pool prices ETH unrealistically). Executor USDC after: 0.
+
+### #4 — Arbitrum Sepolia → OP Sepolia (2026-07-27)
+
+| Step | Chain | Tx |
+|---|---|---|
+| Burn (2.9 USDC) | Arbitrum Sepolia | [`0xf3a90d5f3521c650420f8fb43766f70edf4da685b054d0c840b41562251818e3`](https://sepolia.arbiscan.io/tx/0xf3a90d5f3521c650420f8fb43766f70edf4da685b054d0c840b41562251818e3) |
+| Relay + mint + swap + ETH delivery | OP Sepolia | [`0x71c53980e87fd80ab5c6eb39aaa38896258ba3e1d1c63a64ce48e42f447688eb`](https://sepolia-optimism.etherscan.io/tx/0x71c53980e87fd80ab5c6eb39aaa38896258ba3e1d1c63a64ce48e42f447688eb) |
+
+Result: **0.000562537150249797 native ETH** delivered. End-to-end ≈ 20s.

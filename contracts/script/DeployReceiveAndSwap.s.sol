@@ -35,6 +35,22 @@ contract DeployReceiveAndSwap is Script {
                 weth9: 0x4200000000000000000000000000000000000006
             });
         }
+        if (block.chainid == 11155111) {
+            // Ethereum Sepolia
+            return ChainConfig({
+                usdc: 0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238,
+                swapRouter02: 0x3bFA4769FB09eefC5a80d6E87c3B9C650f7Ae48E,
+                weth9: 0xfFf9976782d46CC05630D1f6eBAb18b2324d6B14
+            });
+        }
+        if (block.chainid == 11155420) {
+            // OP Sepolia (same Uniswap deployment addresses as Base Sepolia)
+            return ChainConfig({
+                usdc: 0x5fd84259d66Cd46123540766Be93DFE6D43130D7,
+                swapRouter02: 0x94cC0AaC535CCDB3C01d6787D6413C739ae12bc4,
+                weth9: 0x4200000000000000000000000000000000000006
+            });
+        }
         revert("no config for this chain");
     }
 

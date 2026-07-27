@@ -13,7 +13,7 @@
 import { config } from "dotenv";
 import { createWalletClient, createPublicClient, http, parseUnits, formatEther, encodeFunctionData, parseAbi, type Chain } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
-import { baseSepolia, arbitrumSepolia } from "viem/chains";
+import { baseSepolia, arbitrumSepolia, sepolia, optimismSepolia } from "viem/chains";
 import { CctpClient, AttestationClient, type SupportedChain } from "@cctp-sdk/core";
 
 config({ path: new URL("../.env", import.meta.url).pathname });
@@ -40,6 +40,20 @@ const LEGS: Record<string, Leg> = {
     domain: 3,
     executor: process.env.RECEIVE_AND_SWAP_ARBITRUM as `0x${string}`,
     poolFee: 3000,
+  },
+  ethereum: {
+    chain: sepolia,
+    rpc: process.env.ETH_SEPOLIA_RPC ?? "https://ethereum-sepolia-rpc.publicnode.com",
+    domain: 0,
+    executor: process.env.RECEIVE_AND_SWAP_ETHEREUM as `0x${string}`,
+    poolFee: 500,
+  },
+  optimism: {
+    chain: optimismSepolia,
+    rpc: process.env.OP_SEPOLIA_RPC ?? "https://sepolia.optimism.io",
+    domain: 2,
+    executor: process.env.RECEIVE_AND_SWAP_OPTIMISM as `0x${string}`,
+    poolFee: 500,
   },
 };
 
