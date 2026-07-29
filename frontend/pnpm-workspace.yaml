@@ -1,0 +1,7 @@
+allowBuilds:
+  sharp: set this to true or false
+ignoredBuiltDependencies:
+  - sharp
+  - unrs-resolver
+minimumReleaseAgeExclude:
+  - '@cctp-sdk/core@0.2.0'
