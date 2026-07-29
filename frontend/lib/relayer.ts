@@ -28,7 +28,7 @@ export async function relaySwap(
     const dest = LEGS[toChain];
     if (!source || !dest) throw new Error(`unknown route ${fromChain} → ${toChain}`);
 
-    updateSwap(burnTxHash, { status: "AWAITING_ATTESTATION" });
+    await updateSwap(burnTxHash, { status: "AWAITING_ATTESTATION" });
     const attestationClient = new AttestationClient(IRIS);
     const { attestation, messageBytes } = await attestationClient.poll(burnTxHash, source.domain, {
       maxAttempts: 90,
@@ -44,7 +44,7 @@ export async function relaySwap(
       // leave null — stats simply won't count this swap's volume
     }
 
-    updateSwap(burnTxHash, { status: "RELAYING", usdcAmount });
+    await updateSwap(burnTxHash, { status: "RELAYING", usdcAmount });
     const account = privateKeyToAccount(process.env.RELAYER_PRIVATE_KEY as `0x${string}`);
     const wallet = createWalletClient({ account, chain: dest.chain, transport: http(dest.rpc) });
     const publicClient = createPublicClient({ chain: dest.chain, transport: http(dest.rpc) });
@@ -57,17 +57,17 @@ export async function relaySwap(
         args: [messageBytes, attestation],
       });
       await publicClient.waitForTransactionReceipt({ hash: relayTxHash });
-      updateSwap(burnTxHash, { status: "COMPLETE", relayTxHash });
+      await updateSwap(burnTxHash, { status: "COMPLETE", relayTxHash });
     } catch (err) {
       // A used nonce means someone else already relayed — that's success.
       if (err instanceof Error && /nonce.*used|used.*nonce/i.test(err.message)) {
-        updateSwap(burnTxHash, { status: "COMPLETE" });
+        await updateSwap(burnTxHash, { status: "COMPLETE" });
         return;
       }
       throw err;
     }
   } catch (err) {
-    updateSwap(burnTxHash, {
+    await updateSwap(burnTxHash, {
       status: "FAILED",
       error: err instanceof Error ? err.message.slice(0, 500) : "unknown error",
     });

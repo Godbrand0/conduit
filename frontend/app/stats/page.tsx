@@ -19,9 +19,9 @@ function StatTile({ label, value, sub }: { label: string; value: string; sub?: s
   );
 }
 
-export default function StatsPage() {
-  const stats = getStats();
-  const recent = getAllSwaps(10);
+export default async function StatsPage() {
+  const stats = await getStats();
+  const recent = await getAllSwaps(10);
   const successRate =
     stats.totalSwaps > 0 ? Math.round((stats.completedSwaps / stats.totalSwaps) * 100) : null;
 
