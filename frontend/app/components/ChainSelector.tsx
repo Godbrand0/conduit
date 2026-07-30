@@ -4,14 +4,26 @@ import { useEffect, useRef, useState } from "react";
 import { ChevronDown } from "lucide-react";
 import { LEGS, LEG_KEYS } from "@/lib/legs";
 
-/** Chain logo hotlinked from TrustWallet's assets repo, keyed by chain slug
- * (matches our leg keys). Falls back to a brand-colored monogram if the image
- * fails. (DefiLlama's CDN serves blank placeholders for base/ethereum.) */
-export function ChainIcon({ chainKey, size = 24 }: { chainKey: string; size?: number }) {
-  const [failed, setFailed] = useState(false);
-  const leg = LEGS[chainKey];
+/**
+ * Chain logo, tried in order:
+ *  1. TrustWallet's assets repo (covers the established chains)
+ *  2. DefiLlama's chain-icon CDN (has newer chains TrustWallet doesn't yet,
+ *     e.g. Arc — but serves tiny blank placeholders for a few chains
+ *     TrustWallet already covers well, like Base/Ethereum, hence trying it
+ *     second rather than first)
+ *  3. A brand-colored monogram if both fail
+ */
+const ICON_SOURCES = (key: string) => [
+  `https://raw.githubusercontent.com/trustwallet/assets/master/blockchains/${key}/info/logo.png`,
+  `https://icons.llamao.fi/icons/chains/rsz_${key}.jpg`,
+];
 
-  if (failed || !leg) {
+export function ChainIcon({ chainKey, size = 24 }: { chainKey: string; size?: number }) {
+  const [sourceIndex, setSourceIndex] = useState(0);
+  const leg = LEGS[chainKey];
+  const sources = leg ? ICON_SOURCES(leg.key) : [];
+
+  if (!leg || sourceIndex >= sources.length) {
     return (
       <span
         className="flex shrink-0 items-center justify-center rounded-full font-bold text-white"
@@ -31,12 +43,13 @@ export function ChainIcon({ chainKey, size = 24 }: { chainKey: string; size?: nu
   return (
     // eslint-disable-next-line @next/next/no-img-element
     <img
-      src={`https://raw.githubusercontent.com/trustwallet/assets/master/blockchains/${leg.key}/info/logo.png`}
+      key={sourceIndex}
+      src={sources[sourceIndex]}
       alt={leg.short}
       width={size}
       height={size}
       className="shrink-0 rounded-full"
-      onError={() => setFailed(true)}
+      onError={() => setSourceIndex((i) => i + 1)}
     />
   );
 }
