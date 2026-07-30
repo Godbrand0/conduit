@@ -2,7 +2,7 @@ import { AttestationClient, HOOK_EXECUTOR_ABI, MESSAGE_TRANSMITTER_ABI } from "@
 import { createWalletClient, createPublicClient, http } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { LEGS } from "./legs";
-import { updateSwap } from "./db";
+import { getSwap, updateSwap } from "./db";
 
 const IRIS = "https://iris-api-sandbox.circle.com";
 
@@ -28,6 +28,38 @@ export async function relaySwap(
     const dest = LEGS[toChain];
     if (!source || !dest) throw new Error(`unknown route ${fromChain} → ${toChain}`);
 
+    // Some public testnet RPCs (Arc's in particular) rate-limit aggressively.
+    // Retry generously so a transient 429 doesn't surface as a swap failure —
+    // the transaction itself is usually already broadcast by that point.
+    const publicClient = createPublicClient({
+      chain: dest.chain,
+      transport: http(dest.rpc, { retryCount: 6, retryDelay: 2000 }),
+    });
+    const account = privateKeyToAccount(process.env.RELAYER_PRIVATE_KEY as `0x${string}`);
+    const wallet = createWalletClient({
+      account,
+      chain: dest.chain,
+      transport: http(dest.rpc, { retryCount: 6, retryDelay: 2000 }),
+    });
+
+    // A prior attempt may have broadcast the relay tx and then failed only
+    // while *confirming* it (exactly what happened on Arc's rate-limited RPC
+    // in production). Check for that before resubmitting — avoids both a
+    // wasted duplicate transaction and the guaranteed nonce-reuse revert.
+    const existing = await getSwap(burnTxHash);
+    if (existing?.relayTxHash) {
+      try {
+        await publicClient.waitForTransactionReceipt({
+          hash: existing.relayTxHash as `0x${string}`,
+        });
+        await updateSwap(burnTxHash, { status: "COMPLETE" });
+        return;
+      } catch {
+        // Genuinely not confirmed (or the RPC is still down) — fall through
+        // and re-derive everything below.
+      }
+    }
+
     await updateSwap(burnTxHash, { status: "AWAITING_ATTESTATION" });
     const attestationClient = new AttestationClient(IRIS);
     const { attestation, messageBytes } = await attestationClient.poll(burnTxHash, source.domain, {
@@ -45,9 +77,6 @@ export async function relaySwap(
     }
 
     await updateSwap(burnTxHash, { status: "RELAYING", usdcAmount });
-    const account = privateKeyToAccount(process.env.RELAYER_PRIVATE_KEY as `0x${string}`);
-    const wallet = createWalletClient({ account, chain: dest.chain, transport: http(dest.rpc) });
-    const publicClient = createPublicClient({ chain: dest.chain, transport: http(dest.rpc) });
 
     try {
       // Arc has no ReceiveAndSwap executor (nothing to swap into — native
@@ -66,6 +95,10 @@ export async function relaySwap(
             functionName: "relayAndExecute",
             args: [messageBytes, attestation],
           });
+      // Persist the hash the moment it's known — a receipt-wait failure
+      // below (rate limits, RPC hiccups) must not lose track of a
+      // transaction that's already broadcast.
+      await updateSwap(burnTxHash, { relayTxHash });
       await publicClient.waitForTransactionReceipt({ hash: relayTxHash });
       await updateSwap(burnTxHash, { status: "COMPLETE", relayTxHash });
     } catch (err) {
