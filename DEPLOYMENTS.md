@@ -140,3 +140,35 @@ native ETH on OP Sepolia.
 
 Result: **0.001093259470395926 native ETH** delivered on OP Sepolia.
 Treasury balance verifiable on-chain: `USDC.balanceOf(0xcEE2…F6Ec) = 1571`.
+
+### #7 & #8 — Arc Testnet ↔ Base Sepolia (2026-07-30, 5th chain, zero new contracts)
+
+Arc's native gas token *is* USDC — confirmed on-chain: `eth_getBalance` and
+the "USDC" address `0x3600…0000` (an ERC20-view precompile, `decimals()=6`,
+**not** 18 as the SDK's `usdcDecimals` field claims — SDK bug, see
+[cctp_sdk](https://github.com/Godbrand0/cctp_sdk) issues) return the same
+balance at a 10^12 scale factor. TokenMessenger and MessageTransmitter are
+deployed at the standard testnet addresses, same as every other CCTP V2 chain.
+
+This means Arc needs **no Conduit contracts at all**:
+- **Arc → anywhere**: no swap step — the sender's native balance already
+  is USDC, so the existing SDK's plain `transfer()` burns directly from the
+  EOA. Adding a destination hook (e.g. Base's `ReceiveAndSwap`) makes it a
+  full native-to-native swap.
+- **Anywhere → Arc**: the existing `SwapAndBurn` (ETH→USDC→burn) works
+  unchanged — just set `mintRecipient` to the user's own address with no
+  hook executor. Minted USDC lands as their native balance directly; there's
+  nothing left to swap into.
+
+Scripts: `scripts/arc-to-base.ts`, `scripts/base-to-arc.ts`.
+
+| Direction | Burn tx | Relay tx | Result |
+|---|---|---|---|
+| Arc → Base (full native-to-native, hook-swapped to ETH) | [`0x13ad19e4…0727df6`](https://testnet.arcscan.app/tx/0x13ad19e4d5178c84d1d2f1325c2ecbebcf91f025faac635cc7e1e1b250727df6) | [`0x8a2b841d…292029`](https://sepolia.basescan.org/tx/0x8a2b841d73da1e171ebaad8bfd782f83da1b06bb60fc6dc926369bfb70292029) | 3 USDC → **0.000982634927642425 ETH**, ~13s |
+| Base → Arc (ETH swapped to USDC, delivered native) | [`0x6dfb3828…b96baba5e4`](https://sepolia.basescan.org/tx/0x6dfb38284b9f2a0695ebc45ca7a8ff585604195268ceebe815c148b96baba5e4) | [`0xeea66a24…a9b6b3cd`](https://testnet.arcscan.app/tx/0xeea66a24b5f2f96a30cf102ec3306dbf4b59905d60b7cc91fe9a8b1ba9b6b3cd) | 0.004 ETH → **12.00814 USDC** landed as native balance |
+
+Note: Circle's `depositForBurnWithHook` reverts on empty `hookData`, so the
+Base→Arc call (via `SwapAndBurn`, which always uses the hook variant) passes
+an inert single byte (`0x00`). It's genuinely never executed — Arc-side
+relaying calls plain `receiveMessage`, not a hook executor — so it's dead
+cargo exactly like any unused hook elsewhere.
