@@ -1,8 +1,10 @@
 "use client";
 
-import React, { useEffect, useState } from "react";
+import { useEffect, useState } from "react";
 import type { SwapRow } from "@/lib/db";
 import { LEGS } from "@/lib/legs";
+import { StatusBadge } from "./StatusBadge";
+import { SwapDetailsModal } from "./SwapDetailsModal";
 
 interface HistoryViewProps {
   onSelectSwap?: (burnTxHash: string, fromChain: string, toChain: string) => void;
@@ -11,6 +13,7 @@ interface HistoryViewProps {
 export function HistoryView({ onSelectSwap }: HistoryViewProps) {
   const [swaps, setSwaps] = useState<SwapRow[]>([]);
   const [loading, setLoading] = useState(true);
+  const [selected, setSelected] = useState<SwapRow | null>(null);
 
   const fetchHistory = async () => {
     try {
@@ -31,46 +34,6 @@ export function HistoryView({ onSelectSwap }: HistoryViewProps) {
     const interval = setInterval(fetchHistory, 5000);
     return () => clearInterval(interval);
   }, []);
-
-  const getStatusBadge = (status: SwapRow["status"]) => {
-    switch (status) {
-      case "COMPLETE":
-        return (
-          <span className="inline-flex items-center gap-1.5 rounded-full border border-emerald-500/30 bg-emerald-950/40 px-2.5 py-1 text-[11px] font-medium text-emerald-400">
-            <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
-            Complete
-          </span>
-        );
-      case "RELAYING":
-        return (
-          <span className="inline-flex items-center gap-1.5 rounded-full border border-cyan-500/30 bg-cyan-950/40 px-2.5 py-1 text-[11px] font-medium text-cyan-400">
-            <span className="h-1.5 w-1.5 rounded-full bg-cyan-400 animate-ping" />
-            Relaying
-          </span>
-        );
-      case "AWAITING_ATTESTATION":
-      case "RECEIVED":
-        return (
-          <span className="inline-flex items-center gap-1.5 rounded-full border border-amber-500/30 bg-amber-950/40 px-2.5 py-1 text-[11px] font-medium text-amber-400">
-            <span className="h-1.5 w-1.5 rounded-full bg-amber-400 animate-pulse" />
-            Attesting
-          </span>
-        );
-      case "FAILED":
-        return (
-          <span className="inline-flex items-center gap-1.5 rounded-full border border-rose-500/30 bg-rose-950/40 px-2.5 py-1 text-[11px] font-medium text-rose-400">
-            <span className="h-1.5 w-1.5 rounded-full bg-rose-400" />
-            Failed
-          </span>
-        );
-      default:
-        return (
-          <span className="inline-flex items-center gap-1.5 rounded-full border border-slate-700 bg-slate-800 px-2.5 py-1 text-[11px] font-medium text-slate-300">
-            {status}
-          </span>
-        );
-    }
-  };
 
   const formatDate = (timestamp: number) => {
     const d = new Date(timestamp);
@@ -131,7 +94,7 @@ export function HistoryView({ onSelectSwap }: HistoryViewProps) {
             return (
               <div
                 key={swap.burnTxHash}
-                onClick={() => onSelectSwap?.(swap.burnTxHash, swap.fromChain, swap.toChain)}
+                onClick={() => setSelected(swap)}
                 className="group relative flex flex-col sm:flex-row sm:items-center justify-between gap-4 rounded-2xl border border-white/5 bg-[var(--card)] p-4 transition-all hover:border-white/10 hover:bg-[var(--card-hover)] cursor-pointer shadow-sm"
               >
                 {/* Left side: Route & Hash */}
@@ -177,7 +140,7 @@ export function HistoryView({ onSelectSwap }: HistoryViewProps) {
 
                 {/* Right side: Status badge & timestamp */}
                 <div className="flex items-center justify-between sm:flex-col sm:items-end gap-2">
-                  {getStatusBadge(swap.status)}
+                  <StatusBadge status={swap.status} />
                   <span className="text-[11px] font-mono text-slate-500">
                     {formatDate(swap.createdAt)}
                   </span>
@@ -186,6 +149,21 @@ export function HistoryView({ onSelectSwap }: HistoryViewProps) {
             );
           })}
         </div>
+      )}
+
+      {selected && (
+        <SwapDetailsModal
+          swap={selected}
+          onClose={() => setSelected(null)}
+          onTrack={
+            onSelectSwap
+              ? () => {
+                  onSelectSwap(selected.burnTxHash, selected.fromChain, selected.toChain);
+                  setSelected(null);
+                }
+              : undefined
+          }
+        />
       )}
     </div>
   );

@@ -46,7 +46,8 @@ export default function Home() {
             )}
 
             <p className="mt-6 text-center text-xs text-slate-600">
-              Testnet MVP · native burn-and-mint · no wrapped tokens ·{" "}
+              <span className="text-amber-400">Testnet</span> MVP · native
+              burn-and-mint · no wrapped tokens · <span className="text-amber-400">Arc Testnet</span> support coming soon ·{" "}
               <a
                 className="underline hover:text-slate-400"
                 href="https://github.com/Godbrand0/conduit"
