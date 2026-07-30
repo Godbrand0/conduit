@@ -49,8 +49,12 @@ export function SwapDetailsModal({ swap, onClose, onTrack }: SwapDetailsModalPro
   const source = LEGS[swap.fromChain] ?? { label: swap.fromChain, short: swap.fromChain, explorer: "" };
   const dest = LEGS[swap.toChain] ?? { label: swap.toChain, short: swap.toChain, explorer: "" };
 
+  // Arc-sourced swaps burn directly from the EOA (no SwapAndBurn contract
+  // exists on Arc, since there's no swap step), so no Conduit fee was taken.
+  const sourceLeg = LEGS[swap.fromChain];
   const burned = swap.usdcAmount;
-  const preFee = burned !== null ? burned / (1 - CONDUIT_FEE_BPS / 10_000) : null;
+  const preFee =
+    burned !== null && !sourceLeg?.nativeIsUsdc ? burned / (1 - CONDUIT_FEE_BPS / 10_000) : null;
   const conduitFee = burned !== null && preFee !== null ? preFee - burned : null;
 
   return (

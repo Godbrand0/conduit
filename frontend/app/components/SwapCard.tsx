@@ -28,6 +28,8 @@ interface SwapCardProps {
 const fmtEth = (wei: bigint, digits = 5) =>
   Number(formatEther(wei)).toLocaleString(undefined, { maximumFractionDigits: digits });
 
+const unitFor = (chainKey: string) => (LEGS[chainKey]?.nativeIsUsdc ? "USDC" : "ETH");
+
 export function SwapCard({
   from,
   to,
@@ -47,6 +49,7 @@ export function SwapCard({
   error,
 }: SwapCardProps) {
   const [showDetails, setShowDetails] = useState(false);
+  const source = LEGS[from];
   const dest = LEGS[to];
 
   return (
@@ -69,7 +72,7 @@ export function SwapCard({
               className="text-xs text-slate-500 transition-colors hover:text-cyan-400"
               title="Use ~95% of balance (reserves gas)"
             >
-              {balance !== null ? `Balance: ${fmtEth(balance, 4)} ETH` : " "}
+              {balance !== null ? `Balance: ${fmtEth(balance, 4)} ${unitFor(from)}` : " "}
             </button>
           </div>
           <div className="flex gap-3">
@@ -83,9 +86,11 @@ export function SwapCard({
                 className="w-full bg-transparent text-2xl font-semibold tracking-tight text-white outline-none placeholder:text-slate-600 [font-variant-numeric:tabular-nums]"
               />
               <div className="mt-0.5 truncate text-xs text-slate-500">
-                {usdcEstimate !== null
-                  ? `≈ ${Number(formatUnits(usdcEstimate, 6)).toLocaleString(undefined, { maximumFractionDigits: 2 })} USDC before fees`
-                  : " "}
+                {source.nativeIsUsdc
+                  ? "native USDC — no swap needed"
+                  : usdcEstimate !== null
+                    ? `≈ ${Number(formatUnits(usdcEstimate, 6)).toLocaleString(undefined, { maximumFractionDigits: 2 })} USDC before fees`
+                    : " "}
               </div>
             </div>
           </div>
@@ -117,7 +122,7 @@ export function SwapCard({
               <div className="truncate text-2xl font-semibold tracking-tight text-white [font-variant-numeric:tabular-nums]">
                 {receiveEstimate !== null ? `~${fmtEth(receiveEstimate)}` : "…"}
               </div>
-              <div className="mt-0.5 truncate text-xs text-slate-500">ETH on {dest.label}</div>
+              <div className="mt-0.5 truncate text-xs text-slate-500">{unitFor(to)} on {dest.label}</div>
             </div>
           </div>
         </div>

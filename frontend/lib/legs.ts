@@ -1,9 +1,17 @@
 import type { Chain } from "viem";
 import { baseSepolia, arbitrumSepolia, sepolia, optimismSepolia } from "viem/chains";
+import { arcTestnet } from "./arcChain";
 
 /**
  * Per-chain Conduit deployment config. All addresses are public testnet
  * deployments, recorded with proofs in ../DEPLOYMENTS.md.
+ *
+ * Every field below is required EXCEPT for chains where `nativeIsUsdc` is
+ * true (currently only Arc): its native gas token IS USDC, so there's no
+ * swap step on either side of a transfer — no SwapAndBurn/ReceiveAndSwap
+ * contract, no Uniswap pool, nothing to quote. Instead it uses the plain
+ * CCTP TokenMessenger/MessageTransmitter directly, via the fields under
+ * "Arc-only fields" below.
  */
 export type Leg = {
   key: string;
@@ -14,19 +22,36 @@ export type Leg = {
   color: string;
   chain: Chain;
   domain: number;
-  /** ReceiveAndSwap v2 hook executor (destination side) */
-  executor: `0x${string}`;
-  /** SwapAndBurn fee-enabled (source side) */
-  swapAndBurn: `0x${string}`;
-  /** USDC/WETH fee tier with verified liquidity */
-  poolFee: number;
-  /** The USDC/WETH Uniswap V3 pool at that fee tier (for spot-price quotes) */
-  pool: `0x${string}`;
-  /** Whether USDC is token0 in that pool (address ordering) */
-  token0IsUsdc: boolean;
   explorer: string;
   /** Server-side RPC (public); the wallet uses its own for writes */
   rpc: string;
+  /** True when this chain's native gas token IS USDC (only Arc, so far).
+   *  No swap on either side; the swap/pool fields below are omitted. */
+  nativeIsUsdc?: boolean;
+
+  // ── Standard-chain fields (omitted when nativeIsUsdc) ──────────────────
+  /** ReceiveAndSwap v2 hook executor (destination side) */
+  executor?: `0x${string}`;
+  /** SwapAndBurn fee-enabled (source side) */
+  swapAndBurn?: `0x${string}`;
+  /** USDC/WETH fee tier with verified liquidity */
+  poolFee?: number;
+  /** The USDC/WETH Uniswap V3 pool at that fee tier (for spot-price quotes) */
+  pool?: `0x${string}`;
+  /** Whether USDC is token0 in that pool (address ordering) */
+  token0IsUsdc?: boolean;
+
+  // ── Arc-only fields (raw CCTP, no Conduit contracts deployed there) ────
+  /** Standard CCTP TokenMessenger — burns are signed directly by the user's
+   *  EOA when Arc is the source (there's no ETH to swap, so no SwapAndBurn
+   *  wrapper exists). */
+  tokenMessenger?: `0x${string}`;
+  /** Standard CCTP MessageTransmitter — the relayer calls receiveMessage
+   *  directly when Arc is the destination (nothing to swap into, so no
+   *  ReceiveAndSwap executor exists). */
+  messageTransmitter?: `0x${string}`;
+  /** The ERC20-view precompile CCTP burns/mints through on Arc. */
+  usdc?: `0x${string}`;
 };
 
 export const LEGS: Record<string, Leg> = {
@@ -90,9 +115,25 @@ export const LEGS: Record<string, Leg> = {
     explorer: "https://sepolia-optimism.etherscan.io",
     rpc: "https://sepolia.optimism.io",
   },
+  arc: {
+    key: "arc",
+    label: "Arc Testnet",
+    short: "Arc",
+    color: "#00C7B7",
+    chain: arcTestnet,
+    domain: 26,
+    nativeIsUsdc: true,
+    tokenMessenger: "0x8FE6B999Dc680CcFDD5Bf7EB0974218be2542DAA",
+    messageTransmitter: "0xE737e5cEBEEBa77EFE34D4aa090756590b1CE275",
+    usdc: "0x3600000000000000000000000000000000000000",
+    explorer: "https://testnet.arcscan.app",
+    rpc: "https://rpc.testnet.arc.network",
+  },
 };
 
 export const LEG_KEYS = Object.keys(LEGS);
+
+export const ZERO_BYTES32 = `0x${"0".repeat(64)}` as const;
 
 export const SWAP_AND_BURN_ABI = [
   {

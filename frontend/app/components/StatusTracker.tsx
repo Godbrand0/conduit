@@ -7,9 +7,10 @@ interface StatusTrackerProps {
   steps: SwapStep[];
   serverSwap: SwapRow | null;
   destLabel: string;
+  destIsUsdc?: boolean;
 }
 
-export function StatusTracker({ steps, serverSwap, destLabel }: StatusTrackerProps) {
+export function StatusTracker({ steps, serverSwap, destLabel, destIsUsdc }: StatusTrackerProps) {
   return (
     <div className="mt-5 space-y-3 rounded-2xl border border-white/5 bg-[var(--card)] p-5 shadow-2xl shadow-black/40">
       {steps.map((s) => (
@@ -40,8 +41,8 @@ export function StatusTracker({ steps, serverSwap, destLabel }: StatusTrackerPro
       ))}
       {serverSwap?.status === "COMPLETE" && (
         <p className="pt-1 text-sm text-emerald-400">
-          Native ETH delivered on {destLabel}. You can close this tab any time — the relayer
-          finishes without you.
+          Native {destIsUsdc ? "USDC" : "ETH"} delivered on {destLabel}. You can close this tab
+          any time — the relayer finishes without you.
         </p>
       )}
       {serverSwap?.status === "FAILED" && (

@@ -1,4 +1,4 @@
-import { AttestationClient, HOOK_EXECUTOR_ABI } from "@cctp-sdk/core";
+import { AttestationClient, HOOK_EXECUTOR_ABI, MESSAGE_TRANSMITTER_ABI } from "@cctp-sdk/core";
 import { createWalletClient, createPublicClient, http } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { LEGS } from "./legs";
@@ -50,12 +50,22 @@ export async function relaySwap(
     const publicClient = createPublicClient({ chain: dest.chain, transport: http(dest.rpc) });
 
     try {
-      const relayTxHash = await wallet.writeContract({
-        address: dest.executor,
-        abi: HOOK_EXECUTOR_ABI,
-        functionName: "relayAndExecute",
-        args: [messageBytes, attestation],
-      });
+      // Arc has no ReceiveAndSwap executor (nothing to swap into — native
+      // balance already is USDC), so relay via the plain MessageTransmitter
+      // instead of relayAndExecute.
+      const relayTxHash = dest.nativeIsUsdc
+        ? await wallet.writeContract({
+            address: dest.messageTransmitter!,
+            abi: MESSAGE_TRANSMITTER_ABI,
+            functionName: "receiveMessage",
+            args: [messageBytes, attestation],
+          })
+        : await wallet.writeContract({
+            address: dest.executor!,
+            abi: HOOK_EXECUTOR_ABI,
+            functionName: "relayAndExecute",
+            args: [messageBytes, attestation],
+          });
       await publicClient.waitForTransactionReceipt({ hash: relayTxHash });
       await updateSwap(burnTxHash, { status: "COMPLETE", relayTxHash });
     } catch (err) {

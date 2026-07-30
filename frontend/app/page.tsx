@@ -42,12 +42,14 @@ export default function Home() {
                 steps={flow.steps}
                 serverSwap={flow.serverSwap}
                 destLabel={flow.trackedDest.label}
+                destIsUsdc={flow.trackedDest.nativeIsUsdc}
               />
             )}
 
             <p className="mt-6 text-center text-xs text-slate-600">
               <span className="text-amber-400">Testnet</span> MVP · native
-              burn-and-mint · no wrapped tokens · <span className="text-amber-400">Arc Testnet</span> support coming soon ·{" "}
+              burn-and-mint · no wrapped tokens · now live on{" "}
+              <span className="text-amber-400">Arc Testnet</span> ·{" "}
               <a
                 className="underline hover:text-slate-400"
                 href="https://github.com/Godbrand0/conduit"

@@ -10,16 +10,19 @@ import {
   useWriteContract,
 } from "wagmi";
 import { BaseError, encodeFunctionData, padHex, parseEther, parseUnits } from "viem";
-import { encodeHook } from "@cctp-sdk/core";
+import { encodeHook, TOKEN_MESSENGER_ABI, USDC_ABI } from "@cctp-sdk/core";
 import {
   LEGS,
   POOL_SLOT0_ABI,
   SWAP_AND_BURN_ABI,
   SWAP_USDC_TO_NATIVE_ABI,
+  ZERO_BYTES32,
   quoteEthToUsdc,
   quoteUsdcToEth,
 } from "@/lib/legs";
 import type { SwapRow } from "@/lib/db";
+
+const NATIVE_TO_USDC_SCALE = 1_000_000_000_000n; // 1e12: 18-decimal native <-> 6-decimal µUSDC
 
 /** Circle fast-transfer fee (µUSDC) for a route, via our /api/fee proxy. */
 export function useFastFee(from: string, to: string): bigint | null {
@@ -34,7 +37,11 @@ export function useFastFee(from: string, to: string): bigint | null {
   return fee;
 }
 
-/** Spot-quote of the entered ETH amount in USDC from the source pool. */
+/**
+ * Spot-quote of the entered amount in USDC (µ). On Arc the amount field
+ * already means USDC (its native token), so this is a straight unit
+ * conversion — no pool exists to quote against.
+ */
 export function useUsdcEstimate(from: string, amount: string): bigint | null {
   const source = LEGS[from];
   const publicClient = usePublicClient({ chainId: source.chain.id });
@@ -48,12 +55,18 @@ export function useUsdcEstimate(from: string, amount: string): bigint | null {
     } catch {
       return;
     }
-    if (wei === 0n || !publicClient) return;
+    if (wei === 0n) return;
+
+    if (source.nativeIsUsdc) {
+      setEstimate(wei / NATIVE_TO_USDC_SCALE);
+      return;
+    }
+    if (!publicClient) return;
     let stale = false;
     publicClient
-      .readContract({ address: source.pool, abi: POOL_SLOT0_ABI, functionName: "slot0" })
+      .readContract({ address: source.pool!, abi: POOL_SLOT0_ABI, functionName: "slot0" })
       .then((slot0) => {
-        if (!stale) setEstimate(quoteEthToUsdc(wei, slot0[0], source.token0IsUsdc));
+        if (!stale) setEstimate(quoteEthToUsdc(wei, slot0[0], source.token0IsUsdc!));
       })
       .catch(() => {});
     return () => {
@@ -65,38 +78,51 @@ export function useUsdcEstimate(from: string, amount: string): bigint | null {
 }
 
 /**
- * Estimated native ETH received on the destination: source-pool USDC estimate,
- * minus the 0.05% Conduit fee and the Circle fast fee, priced through the
- * destination pool. Spot estimate — ignores swap fees and price impact.
+ * Estimated amount received on the destination, always returned as an
+ * 18-decimal ("wei-equivalent") bigint so formatEther() works universally —
+ * on a normal chain that's native ETH from the destination pool; on Arc
+ * it's the µUSDC net amount scaled back up, since Arc's native balance IS
+ * USDC and needs no swap. The 0.05% Conduit fee only applies when the
+ * source goes through SwapAndBurn (skipped when the source is Arc, since
+ * that path burns directly from the EOA with no Conduit contract involved).
  */
 export function useReceiveEstimate(
+  from: string,
   to: string,
   usdcEstimate: bigint | null,
   fastFee: bigint | null
 ): bigint | null {
+  const source = LEGS[from];
   const dest = LEGS[to];
   const publicClient = usePublicClient({ chainId: dest.chain.id });
   const [estimate, setEstimate] = useState<bigint | null>(null);
 
   useEffect(() => {
     setEstimate(null);
-    if (usdcEstimate === null || !publicClient) return;
-    const net = usdcEstimate - (usdcEstimate * 5n) / 10_000n - (fastFee ?? 1_300_000n);
+    if (usdcEstimate === null) return;
+    const conduitFee = source.nativeIsUsdc ? 0n : (usdcEstimate * 5n) / 10_000n;
+    const net = usdcEstimate - conduitFee - (fastFee ?? 1_300_000n);
     if (net <= 0n) {
       setEstimate(0n);
       return;
     }
+
+    if (dest.nativeIsUsdc) {
+      setEstimate(net * NATIVE_TO_USDC_SCALE);
+      return;
+    }
+    if (!publicClient) return;
     let stale = false;
     publicClient
-      .readContract({ address: dest.pool, abi: POOL_SLOT0_ABI, functionName: "slot0" })
+      .readContract({ address: dest.pool!, abi: POOL_SLOT0_ABI, functionName: "slot0" })
       .then((slot0) => {
-        if (!stale) setEstimate(quoteUsdcToEth(net, slot0[0], dest.token0IsUsdc));
+        if (!stale) setEstimate(quoteUsdcToEth(net, slot0[0], dest.token0IsUsdc!));
       })
       .catch(() => {});
     return () => {
       stale = true;
     };
-  }, [usdcEstimate, fastFee, dest, publicClient]);
+  }, [usdcEstimate, fastFee, source, dest, publicClient]);
 
   return estimate;
 }
@@ -133,7 +159,7 @@ export function useSwapFlow() {
   const sourcePublicClient = usePublicClient({ chainId: source.chain.id });
   const maxFee = useFastFee(from, to);
   const usdcEstimate = useUsdcEstimate(from, amount);
-  const receiveEstimate = useReceiveEstimate(to, usdcEstimate, maxFee);
+  const receiveEstimate = useReceiveEstimate(from, to, usdcEstimate, maxFee);
   const { data: balance } = useBalance({ address, chainId: source.chain.id });
 
   // The tracked swap's own route (may differ from the selectors, e.g. when
@@ -173,9 +199,15 @@ export function useSwapFlow() {
     const burnDone = !!burnReceipt;
     const attested = serverSwap?.status === "RELAYING" || serverSwap?.status === "COMPLETE";
     const complete = serverSwap?.status === "COMPLETE";
+    const burnLabel = trackedSource.nativeIsUsdc
+      ? `Burn native USDC on ${trackedSource.label}`
+      : `Swap ETH → USDC + burn on ${trackedSource.label}`;
+    const mintLabel = trackedDest.nativeIsUsdc
+      ? `Mint native USDC on ${trackedDest.label}`
+      : `Mint + swap USDC → ETH on ${trackedDest.label}`;
     return [
       {
-        label: `Swap ETH → USDC + burn on ${trackedSource.label}`,
+        label: burnLabel,
         done: burnDone,
         active: !!tracked && !burnDone,
         link: tracked ? `${trackedSource.explorer}/tx/${tracked.hash}` : null,
@@ -187,7 +219,7 @@ export function useSwapFlow() {
         link: null,
       },
       {
-        label: `Mint + swap USDC → ETH on ${trackedDest.label}`,
+        label: mintLabel,
         done: complete,
         active: attested && !complete,
         link: serverSwap?.relayTxHash
@@ -218,18 +250,6 @@ export function useSwapFlow() {
         await switchChainAsync({ chainId: source.chain.id });
       }
       const fee = maxFee ?? 1_300_000n;
-      const hook = encodeHook({
-        target: dest.executor,
-        calldata: encodeFunctionData({
-          abi: SWAP_USDC_TO_NATIVE_ABI,
-          functionName: "swapUsdcToNative",
-          // amountIn=0: swap all minted USDC. minOut=1: testnet pools carry
-          // arbitrary prices; production quoting sets a real slippage floor.
-          args: [0n, dest.poolFee, 1n, address!],
-        }),
-        forwardAmount: 0n,
-      });
-      const executorBytes32 = padHex(dest.executor, { size: 32 });
       // Wallets underestimate fees on Arbitrum Sepolia (maxFeePerGas below the
       // base fee → RPC rejects). Quote the base fee ourselves with 3x headroom;
       // unspent headroom is refunded.
@@ -240,24 +260,103 @@ export function useSwapFlow() {
             maxPriorityFeePerGas: 1_000_000n,
           }
         : {};
-      const hash = await writeContractAsync({
-        address: source.swapAndBurn,
-        abi: SWAP_AND_BURN_ABI,
-        functionName: "swapAndBurnNative",
-        args: [
-          parseUnits("2", 6),
-          source.poolFee,
-          dest.domain,
-          executorBytes32,
-          executorBytes32,
-          fee,
-          1000,
-          hook,
-        ],
-        value: parseEther(amount || "0"),
-        chainId: source.chain.id,
-        ...gasFees,
-      });
+
+      let hash: `0x${string}`;
+
+      if (source.nativeIsUsdc) {
+        // Arc as source: native balance already IS USDC, so there's no swap
+        // and no Conduit contract — burn directly from the EOA via the
+        // standard TokenMessenger, same mechanics as any CCTP integrator.
+        const usdcAmount = parseEther(amount || "0") / NATIVE_TO_USDC_SCALE;
+        const allowance = await sourcePublicClient!.readContract({
+          address: source.usdc!,
+          abi: USDC_ABI,
+          functionName: "allowance",
+          args: [address!, source.tokenMessenger!],
+        });
+        if (allowance < usdcAmount) {
+          const approveHash = await writeContractAsync({
+            address: source.usdc!,
+            abi: USDC_ABI,
+            functionName: "approve",
+            args: [source.tokenMessenger!, usdcAmount],
+            chainId: source.chain.id,
+          });
+          await sourcePublicClient!.waitForTransactionReceipt({ hash: approveHash });
+        }
+
+        const hook = encodeHook({
+          target: dest.executor!,
+          calldata: encodeFunctionData({
+            abi: SWAP_USDC_TO_NATIVE_ABI,
+            functionName: "swapUsdcToNative",
+            args: [0n, dest.poolFee!, 1n, address!],
+          }),
+          forwardAmount: 0n,
+        });
+        const executorBytes32 = padHex(dest.executor!, { size: 32 });
+
+        hash = await writeContractAsync({
+          address: source.tokenMessenger!,
+          abi: TOKEN_MESSENGER_ABI,
+          functionName: "depositForBurnWithHook",
+          args: [
+            usdcAmount,
+            dest.domain,
+            executorBytes32,
+            source.usdc!,
+            executorBytes32,
+            fee,
+            1000,
+            hook,
+          ],
+          chainId: source.chain.id,
+        });
+      } else {
+        // Standard SwapAndBurn path. When the destination is Arc there's no
+        // executor to swap into — mint straight to the user's own address,
+        // no hook. TokenMessenger's WithHook variant rejects empty hookData,
+        // so pass an inert byte; the relayer calls plain receiveMessage for
+        // an Arc destination, so it's never decoded or executed.
+        const mintRecipient = dest.nativeIsUsdc ? address! : dest.executor!;
+        const mintRecipientBytes32 = padHex(mintRecipient, { size: 32 });
+        const destinationCaller = dest.nativeIsUsdc
+          ? ZERO_BYTES32
+          : padHex(dest.executor!, { size: 32 });
+        const hookData = dest.nativeIsUsdc
+          ? ("0x00" as const)
+          : encodeHook({
+              target: dest.executor!,
+              calldata: encodeFunctionData({
+                abi: SWAP_USDC_TO_NATIVE_ABI,
+                functionName: "swapUsdcToNative",
+                // amountIn=0: swap all minted USDC. minOut=1: testnet pools carry
+                // arbitrary prices; production quoting sets a real slippage floor.
+                args: [0n, dest.poolFee!, 1n, address!],
+              }),
+              forwardAmount: 0n,
+            });
+
+        hash = await writeContractAsync({
+          address: source.swapAndBurn!,
+          abi: SWAP_AND_BURN_ABI,
+          functionName: "swapAndBurnNative",
+          args: [
+            parseUnits("2", 6),
+            source.poolFee!,
+            dest.domain,
+            mintRecipientBytes32,
+            destinationCaller,
+            fee,
+            1000,
+            hookData,
+          ],
+          value: parseEther(amount || "0"),
+          chainId: source.chain.id,
+          ...gasFees,
+        });
+      }
+
       setTracked({ hash, from, to });
       await fetch("/api/swaps", {
         method: "POST",

@@ -172,3 +172,32 @@ Base→Arc call (via `SwapAndBurn`, which always uses the hook variant) passes
 an inert single byte (`0x00`). It's genuinely never executed — Arc-side
 relaying calls plain `receiveMessage`, not a hook executor — so it's dead
 cargo exactly like any unused hook elsewhere.
+
+### #9 — Arc wired into the live frontend + relayer (2026-07-30)
+
+Arc is now a selectable chain in the app itself (`frontend/lib/legs.ts`),
+not just standalone scripts. Verified through the **actual running app**,
+not a reimplementation: burned 0.004 ETH on Base via `SwapAndBurn` exactly
+as the UI's `swap()` constructs the call (mintRecipient = own address,
+destinationCaller = 0, inert `0x00` hookData), then `POST /api/swaps` to a
+live `next start` server and polled `GET /api/swaps/:hash` — confirming
+`lib/relayer.ts`'s new Arc branch (plain `receiveMessage` instead of
+`relayAndExecute`) runs correctly in production code, end to end:
+
+```
+RECEIVED → AWAITING_ATTESTATION → RELAYING → COMPLETE
+```
+
+| Step | Tx |
+|---|---|
+| Burn (Base Sepolia) | [`0xfa53bb28…7e14857a`](https://sepolia.basescan.org/tx/0xfa53bb28a18dd9abc6074767b92b14f826c93a2fefea8d22bf958eb97e14857a) |
+| Relay (Arc Testnet, via the app's relayer) | [`0x6d4351fa…2bcf15e4`](https://testnet.arcscan.app/tx/0x6d4351fa3653687fd6e0af88c377fd2a2aea28be7bae0c3751ce18042bcf15e4) |
+
+Result: 11.764396 USDC landed as native balance on Arc, volume correctly
+decoded and persisted (`usdcAmount: 11764396`) — the same code path
+`/stats` reads from.
+
+Known limitation: Arc-sourced swaps burn directly from the EOA (there's no
+SwapAndBurn-equivalent on Arc, since there's nothing to swap), so they
+currently skip the 0.05% Conduit fee. `SwapDetailsModal` accounts for this
+when displaying the fee breakdown.
