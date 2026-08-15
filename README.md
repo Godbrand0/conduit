@@ -6,7 +6,7 @@
 
 ![Status](https://img.shields.io/badge/status-live%20on%20testnet-green)
 ![Protocol](https://img.shields.io/badge/protocol-CCTP%20V2-blue)
-![Chains](https://img.shields.io/badge/chains-5-purple)
+![Chains](https://img.shields.io/badge/chains-6-purple)
 ![License](https://img.shields.io/badge/license-MIT-orange)
 
 **Live app:** https://conduit-sandy.vercel.app
@@ -126,6 +126,7 @@ for every transaction hash.
 | Arbitrum Sepolia | [`0xcEE2b537Ee71c0B4399761537357c1c2B5A5F6Ec`](https://sepolia.arbiscan.io/address/0xcEE2b537Ee71c0B4399761537357c1c2B5A5F6Ec) | [`0x9B6aaDaEeD2cAF2B3b26C62aA5dEaCcB8052F40B`](https://sepolia.arbiscan.io/address/0x9B6aaDaEeD2cAF2B3b26C62aA5dEaCcB8052F40B) |
 | Ethereum Sepolia | [`0x9A732afcA3Fbc0FB9a0dDF677dC1c35549499766`](https://sepolia.etherscan.io/address/0x9A732afcA3Fbc0FB9a0dDF677dC1c35549499766) | [`0x226EC562076549FdD16ecaaF437CD77E49D102c5`](https://sepolia.etherscan.io/address/0x226EC562076549FdD16ecaaF437CD77E49D102c5) |
 | OP Sepolia | [`0x84B1634Ec67d309AEB9DC422F001350e467DCBc8`](https://sepolia-optimism.etherscan.io/address/0x84B1634Ec67d309AEB9DC422F001350e467DCBc8) | [`0xAead88469c8DBdA0efd12c6993eDCb2F171D8203`](https://sepolia-optimism.etherscan.io/address/0xAead88469c8DBdA0efd12c6993eDCb2F171D8203) |
+| Unichain Sepolia | [`0xcc5b18B89C7709EeB840c2cA4875c39e17d57c21`](https://sepolia.uniscan.xyz/address/0xcc5b18B89C7709EeB840c2cA4875c39e17d57c21) | [`0x60D6EDA1573f13268f5a925CB8ECabe00ABB2C6f`](https://sepolia.uniscan.xyz/address/0x60D6EDA1573f13268f5a925CB8ECabe00ABB2C6f) |
 | Arc Testnet | *none — direct CCTP `TokenMessenger`* | *none — direct CCTP `MessageTransmitter`* |
 
 Every `SwapAndBurn` charges a 0.05% Conduit fee (`FEE_BPS = 5`), skimmed
@@ -197,11 +198,14 @@ Every route above has a real, verifiable transaction — burn hash, relay
 hash, and delivered amount — recorded in
 **[DEPLOYMENTS.md](./DEPLOYMENTS.md)**. Highlights:
 
-- Full bidirectional native-to-native swaps across all 4 standard
+- Full bidirectional native-to-native swaps across all 5 standard
   chains, including the fee-enabled flow (0.05% Conduit fee visibly
   skimmed on-chain).
 - Arc Testnet proven in both directions — Arc → Base in ~13 seconds
   with zero Conduit contracts involved on the Arc side.
+- Unichain Sepolia proven in both directions, with its real
+  (non-canonical) SwapRouter02 address found by tracing a live pool's
+  swap events rather than trusting a documented address.
 - The live frontend's relayer verified against a running production
   server, not just standalone scripts.
 

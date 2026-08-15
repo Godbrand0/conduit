@@ -11,7 +11,7 @@
 import { config } from "dotenv";
 import { createWalletClient, createPublicClient, http, parseEther, parseUnits, formatEther, encodeFunctionData, parseAbi, padHex, type Chain } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
-import { baseSepolia, arbitrumSepolia, sepolia, optimismSepolia } from "viem/chains";
+import { baseSepolia, arbitrumSepolia, sepolia, optimismSepolia, unichainSepolia } from "viem/chains";
 import { AttestationClient, encodeHook, HOOK_EXECUTOR_ABI } from "@cctp-sdk/core";
 
 config({ path: new URL("../.env", import.meta.url).pathname });
@@ -57,6 +57,14 @@ const LEGS: Record<string, Leg> = {
     executor: process.env.RECEIVE_AND_SWAP_OPTIMISM as `0x${string}`,
     swapAndBurn: process.env.SWAP_AND_BURN_OPTIMISM as `0x${string}`,
     poolFee: 500,
+  },
+  unichain: {
+    chain: unichainSepolia,
+    rpc: process.env.UNICHAIN_SEPOLIA_RPC ?? "https://sepolia.unichain.org",
+    domain: 10,
+    executor: process.env.RECEIVE_AND_SWAP_UNICHAIN as `0x${string}`,
+    swapAndBurn: process.env.SWAP_AND_BURN_UNICHAIN as `0x${string}`,
+    poolFee: 3000,
   },
 };
 

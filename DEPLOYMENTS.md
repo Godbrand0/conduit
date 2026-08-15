@@ -21,6 +21,8 @@ any ERC20) → USDC → CCTP burn with hook, in one transaction.
 | SwapAndBurn (fee-enabled) | Ethereum Sepolia | [`0x9A732afcA3Fbc0FB9a0dDF677dC1c35549499766`](https://sepolia.etherscan.io/address/0x9A732afcA3Fbc0FB9a0dDF677dC1c35549499766) | — |
 | SwapAndBurn (fee-enabled) | OP Sepolia | [`0x84B1634Ec67d309AEB9DC422F001350e467DCBc8`](https://sepolia-optimism.etherscan.io/address/0x84B1634Ec67d309AEB9DC422F001350e467DCBc8) | — |
 | SwapAndBurn v1 (no fee, superseded) | Base Sepolia | `0x9bF592B913BB735d1e4fed5c5B5a6073B9b4E62E` | [`0x3063fdfe…9bf589`](https://sepolia.basescan.org/tx/0x3063fdfe2c0ab645783d30aed00b319b09a6b7a2fe5f1bef78663868a69bf589) |
+| ReceiveAndSwap v2 | Unichain Sepolia | [`0x60D6EDA1573f13268f5a925CB8ECabe00ABB2C6f`](https://sepolia.uniscan.xyz/address/0x60D6EDA1573f13268f5a925CB8ECabe00ABB2C6f) | — |
+| SwapAndBurn (fee-enabled) | Unichain Sepolia | [`0xcc5b18B89C7709EeB840c2cA4875c39e17d57c21`](https://sepolia.uniscan.xyz/address/0xcc5b18B89C7709EeB840c2cA4875c39e17d57c21) | — |
 
 ## Contracts — v1 (historical, superseded by v2)
 
@@ -201,3 +203,26 @@ Known limitation: Arc-sourced swaps burn directly from the EOA (there's no
 SwapAndBurn-equivalent on Arc, since there's nothing to swap), so they
 currently skip the 0.05% Conduit fee. `SwapDetailsModal` accounts for this
 when displaying the fee breakdown.
+
+### #10 & #11 — Unichain Sepolia ↔ Base Sepolia (2026-08-06, 6th chain)
+
+Uniswap's own rollup. Uniswap V3 is deployed there, but not at the
+canonical mainnet addresses — the Factory is (`0x1F98…31F984`, confirmed
+via `owner()`), but the SwapRouter02 address had to be found by scanning
+a live pool's `Swap` events for a real `exactInputSingle` call and
+confirming the sender contract's `factory()`/`WETH9()` match, since
+neither the canonical address nor the address returned by a web search
+actually resolved on-chain. Verified router:
+[`0xd1AAE39293221B77B0C71fBD6dCb7Ea29Bb5B166`](https://sepolia.uniscan.xyz/address/0xd1AAE39293221B77B0C71fBD6dCb7Ea29Bb5B166).
+USDC/WETH pools exist at all four standard fee tiers with real liquidity;
+deployed against the 3000 (0.3%) tier, matching Base/Arbitrum's convention.
+
+| Direction | Burn tx | Relay tx | Result |
+|---|---|---|---|
+| Unichain → Base (full native-to-native) | [`0x281364730e…486e4636`](https://sepolia.uniscan.xyz/tx/0x281364730e40db5b41e5986aedc69e9e2f52d20c5a353e85d409a15a486e4636) | [`0xff04065cd7…7f1688147a`](https://sepolia.basescan.org/tx/0xff04065cd704adda91a968b3585c8be0a2992df6b757ebdd6c061b7f1688147a) | 0.02295056 ETH delivered on Base |
+| Base → Unichain (reverse route, 0.05% fee) | [`0xdd572eb58d…dd6f61767`](https://sepolia.basescan.org/tx/0xdd572eb58d50888a32d222846d8034440d20809d99e0e8c71770f9bdd6f61767) | [`0x0d05196d4a…497a8b457`](https://sepolia.uniscan.xyz/tx/0x0d05196d4a2348a427ba5142d281bd4829b53c9811f78ff33a23a86497a8b457) | 0.001936672176777817 ETH delivered on Unichain (confirmed via the WETH `Withdrawal` event in the relay tx's logs — the e2e script's own before/after balance readout misleadingly showed ~0, since that run self-relayed and paid its own relay gas from the same wallet it measured) |
+
+Both runs used the 0.05%-fee `SwapAndBurn`; Unichain → Base additionally
+proves the destination-side `ReceiveAndSwap` hook execution on a 6th
+distinct chain with a non-canonical router address, without any code
+changes beyond the deploy-script config.

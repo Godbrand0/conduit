@@ -1,5 +1,5 @@
 import type { Chain } from "viem";
-import { baseSepolia, arbitrumSepolia, sepolia, optimismSepolia } from "viem/chains";
+import { baseSepolia, arbitrumSepolia, sepolia, optimismSepolia, unichainSepolia } from "viem/chains";
 import { arcTestnet } from "./arcChain";
 
 /**
@@ -114,6 +114,21 @@ export const LEGS: Record<string, Leg> = {
     token0IsUsdc: false, // WETH (0x4200…) sorts below USDC (0x5fd8…) on OP Sepolia
     explorer: "https://sepolia-optimism.etherscan.io",
     rpc: "https://sepolia.optimism.io",
+  },
+  unichain: {
+    key: "unichain",
+    label: "Unichain Sepolia",
+    short: "Unichain",
+    color: "#FF007A",
+    chain: unichainSepolia,
+    domain: 10,
+    executor: "0x60D6EDA1573f13268f5a925CB8ECabe00ABB2C6f",
+    swapAndBurn: "0xcc5b18B89C7709EeB840c2cA4875c39e17d57c21",
+    poolFee: 3000,
+    pool: "0x8F463126bBEA80A10DF9Bf6FF5455B6B0292B34e",
+    token0IsUsdc: true,
+    explorer: "https://sepolia.uniscan.xyz",
+    rpc: "https://sepolia.unichain.org",
   },
   arc: {
     key: "arc",

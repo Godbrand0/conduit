@@ -9,6 +9,10 @@ import {ReceiveAndSwap} from "../src/ReceiveAndSwap.sol";
 /// Uniswap addresses verified on-chain per chain (factory() + WETH9() probes):
 ///  - Arbitrum Sepolia 2026-07-27: router 0x101F..663E, WETH 0x980B..7c73
 ///  - Base Sepolia     2026-07-27: router 0x94cC..2bc4, WETH 0x4200..0006
+///  - Unichain Sepolia 2026-07-30: router 0xd1AA..B166, WETH 0x4200..0006
+///    (found via the real router's exactInputSingle calldata on a live pool
+///    swap tx, then confirmed with factory()/WETH9() — the canonical
+///    mainnet SwapRouter02 address isn't deployed there)
 contract DeployReceiveAndSwap is Script {
     address constant TESTNET_MESSAGE_TRANSMITTER = 0xE737e5cEBEEBa77EFE34D4aa090756590b1CE275;
 
@@ -48,6 +52,14 @@ contract DeployReceiveAndSwap is Script {
             return ChainConfig({
                 usdc: 0x5fd84259d66Cd46123540766Be93DFE6D43130D7,
                 swapRouter02: 0x94cC0AaC535CCDB3C01d6787D6413C739ae12bc4,
+                weth9: 0x4200000000000000000000000000000000000006
+            });
+        }
+        if (block.chainid == 1301) {
+            // Unichain Sepolia
+            return ChainConfig({
+                usdc: 0x31d0220469e10c4E71834a79b1f276d740d3768F,
+                swapRouter02: 0xd1AAE39293221B77B0C71fBD6dCb7Ea29Bb5B166,
                 weth9: 0x4200000000000000000000000000000000000006
             });
         }
