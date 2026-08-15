@@ -78,6 +78,11 @@ export async function relaySwap(
 
     await updateSwap(burnTxHash, { status: "RELAYING", usdcAmount });
 
+    // Avalanche Fuji's public RPC intermittently misestimates gas for
+    // contract-to-contract calls ("exceeds block gas limit" on a call that
+    // works fine with an explicit limit) — bypass automatic estimation.
+    const gasOverride = dest.dex === "v2" ? { gas: 800_000n } : {};
+
     try {
       // Arc has no ReceiveAndSwap executor (nothing to swap into — native
       // balance already is USDC), so relay via the plain MessageTransmitter
@@ -88,12 +93,14 @@ export async function relaySwap(
             abi: MESSAGE_TRANSMITTER_ABI,
             functionName: "receiveMessage",
             args: [messageBytes, attestation],
+            ...gasOverride,
           })
         : await wallet.writeContract({
             address: dest.executor!,
             abi: HOOK_EXECUTOR_ABI,
             functionName: "relayAndExecute",
             args: [messageBytes, attestation],
+            ...gasOverride,
           });
       // Persist the hash the moment it's known — a receipt-wait failure
       // below (rate limits, RPC hiccups) must not lose track of a

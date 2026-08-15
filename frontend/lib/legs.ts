@@ -1,5 +1,5 @@
 import type { Chain } from "viem";
-import { baseSepolia, arbitrumSepolia, sepolia, optimismSepolia, unichainSepolia } from "viem/chains";
+import { baseSepolia, arbitrumSepolia, sepolia, optimismSepolia, unichainSepolia, avalancheFuji } from "viem/chains";
 import { arcTestnet } from "./arcChain";
 
 /**
@@ -28,15 +28,23 @@ export type Leg = {
   /** True when this chain's native gas token IS USDC (only Arc, so far).
    *  No swap on either side; the swap/pool fields below are omitted. */
   nativeIsUsdc?: boolean;
+  /** "v2" when the swap/burn contracts are the Uniswap-V2-style variant
+   *  (SwapAndBurnUniV2/ReceiveAndSwapUniV2 — currently only Avalanche,
+   *  where Uniswap V3 isn't deployed). Changes: quote math (constant-product
+   *  reserves instead of sqrtPriceX96), ABI shape (no poolFee param), and
+   *  `pool` means the LP pair address rather than a V3 pool. Omitted/"v3"
+   *  for every other standard chain. */
+  dex?: "v2";
 
   // ── Standard-chain fields (omitted when nativeIsUsdc) ──────────────────
   /** ReceiveAndSwap v2 hook executor (destination side) */
   executor?: `0x${string}`;
   /** SwapAndBurn fee-enabled (source side) */
   swapAndBurn?: `0x${string}`;
-  /** USDC/WETH fee tier with verified liquidity */
+  /** USDC/WETH fee tier with verified liquidity (V3 chains only) */
   poolFee?: number;
-  /** The USDC/WETH Uniswap V3 pool at that fee tier (for spot-price quotes) */
+  /** The USDC/WETH pool for spot-price quotes — a Uniswap V3 pool normally,
+   *  or the LP pair address when dex is "v2" */
   pool?: `0x${string}`;
   /** Whether USDC is token0 in that pool (address ordering) */
   token0IsUsdc?: boolean;
@@ -130,6 +138,21 @@ export const LEGS: Record<string, Leg> = {
     explorer: "https://sepolia.uniscan.xyz",
     rpc: "https://sepolia.unichain.org",
   },
+  avalanche: {
+    key: "avalanche",
+    label: "Avalanche Fuji",
+    short: "Avalanche",
+    color: "#E84142",
+    chain: avalancheFuji,
+    domain: 1,
+    dex: "v2",
+    executor: "0x064B35CA8f0886A10eD7C43E29D558E66b0dea36",
+    swapAndBurn: "0x9AcD57857367494eb6CB02Bd2241Cc78FdCdDe8b",
+    pool: "0x8Aa1D713454bD21D10c9d25d717C59Ad75406888", // Pangolin WAVAX/USDC pair
+    token0IsUsdc: true,
+    explorer: "https://testnet.snowtrace.io",
+    rpc: "https://api.avax-test.network/ext/bc/C/rpc",
+  },
   arc: {
     key: "arc",
     label: "Arc Testnet",
@@ -206,6 +229,83 @@ export function quoteUsdcToEth(usdcMicro: bigint, sqrtPriceX96: bigint, token0Is
   const priceX192 = sqrtPriceX96 * sqrtPriceX96;
   return token0IsUsdc ? (usdcMicro * priceX192) / Q192 : (usdcMicro * Q192) / priceX192;
 }
+
+export const PAIR_RESERVES_ABI = [
+  {
+    type: "function",
+    name: "getReserves",
+    stateMutability: "view",
+    inputs: [],
+    outputs: [
+      { name: "reserve0", type: "uint112" },
+      { name: "reserve1", type: "uint112" },
+      { name: "blockTimestampLast", type: "uint32" },
+    ],
+  },
+] as const;
+
+/** Spot-quote ETH (wei) → USDC (µ) from a Uniswap-V2-style pair's reserves,
+ * including the standard 0.3% LP fee (matches Pangolin/Trader Joe V1). */
+export function quoteEthToUsdcV2(
+  ethWei: bigint,
+  reserve0: bigint,
+  reserve1: bigint,
+  token0IsUsdc: boolean
+): bigint {
+  const [reserveUsdc, reserveEth] = token0IsUsdc ? [reserve0, reserve1] : [reserve1, reserve0];
+  const ethInWithFee = ethWei * 997n;
+  return (reserveUsdc * ethInWithFee) / (reserveEth * 1000n + ethInWithFee);
+}
+
+/** Spot-quote USDC (µ) → ETH (wei) — the inverse, for the receive estimate. */
+export function quoteUsdcToEthV2(
+  usdcMicro: bigint,
+  reserve0: bigint,
+  reserve1: bigint,
+  token0IsUsdc: boolean
+): bigint {
+  const [reserveUsdc, reserveEth] = token0IsUsdc ? [reserve0, reserve1] : [reserve1, reserve0];
+  const usdcInWithFee = usdcMicro * 997n;
+  return (reserveEth * usdcInWithFee) / (reserveUsdc * 1000n + usdcInWithFee);
+}
+
+/** SwapAndBurnUniV2's ABI — same shape as SWAP_AND_BURN_ABI but no poolFee
+ * param, since Uniswap-V2-style routers have no fee tiers. */
+export const SWAP_AND_BURN_V2_ABI = [
+  {
+    type: "function",
+    name: "swapAndBurnNative",
+    stateMutability: "payable",
+    inputs: [
+      { name: "minUsdcOut", type: "uint256" },
+      { name: "destinationDomain", type: "uint32" },
+      { name: "mintRecipient", type: "bytes32" },
+      { name: "destinationCaller", type: "bytes32" },
+      { name: "maxFee", type: "uint256" },
+      { name: "minFinalityThreshold", type: "uint32" },
+      { name: "hookData", type: "bytes" },
+    ],
+    outputs: [{ name: "usdcBurned", type: "uint256" }],
+  },
+  { type: "error", name: "NothingSent", inputs: [] },
+  { type: "error", name: "UsdcBelowFee", inputs: [] },
+  { type: "error", name: "NotOwner", inputs: [] },
+] as const;
+
+/** ReceiveAndSwapUniV2's hook-target ABI — no poolFee param. */
+export const SWAP_USDC_TO_NATIVE_V2_ABI = [
+  {
+    type: "function",
+    name: "swapUsdcToNative",
+    stateMutability: "nonpayable",
+    inputs: [
+      { name: "amountIn", type: "uint256" },
+      { name: "minOut", type: "uint256" },
+      { name: "recipient", type: "address" },
+    ],
+    outputs: [],
+  },
+] as const;
 
 export const SWAP_USDC_TO_NATIVE_ABI = [
   {

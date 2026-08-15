@@ -263,7 +263,31 @@ swap amounts here are deliberately small. Would very likely work unchanged
 against mainnet Trader Joe or Pangolin, which are heavily-used production
 routers — this looks like a testnet-maintenance issue (Trader Joe's V1
 router) or thin-testnet-liquidity issue (Pangolin), not a flaw in the
-contract pattern itself. Also note: `Avalanche Fuji's public RPC (like Arc's
+contract pattern itself. Also note: Avalanche Fuji's public RPC (like Arc's
 and Unichain's) required an explicit gas limit on the swap+burn and relay
 calls — automatic gas estimation intermittently reported "exceeds block gas
 limit" for these specific contract-to-contract calls.
+
+### #14 — Avalanche wired into the live frontend + relayer (2026-08-15)
+
+Avalanche is now a selectable chain in the app (`frontend/lib/legs.ts`), not
+just standalone scripts. Required real new logic, not just a config entry —
+the swap/quote code branches on a new `dex: "v2"` field: reserve-based spot
+quoting (constant-product math, `getReserves()`) instead of Uniswap V3's
+`sqrtPriceX96`, and a V2-shaped ABI (`SWAP_AND_BURN_V2_ABI` /
+`SWAP_USDC_TO_NATIVE_V2_ABI` — no `poolFee` param) for both the burn call and
+the destination hook. The relayer also needed the same explicit-gas-limit
+fix already noted above, applied server-side for a Fuji destination.
+
+Verified through the actual running app (same method as Arc/Unichain): a
+Base → Avalanche burn built with the frontend's exact call shape, POSTed to
+a live `next start` server's `/api/swaps`, and polled through
+`RECEIVED → AWAITING_ATTESTATION → RELAYING → COMPLETE` —
+
+| Step | Tx |
+|---|---|
+| Burn (Base Sepolia) | [`0xb4ad0bf2…dd71c8`](https://sepolia.basescan.org/tx/0xb4ad0bf2e05ed39425ce5370602e2b01d522f7bd7e9b2c2e1d03e47da4dd71c8) |
+| Relay (Avalanche Fuji, via the app's relayer, gas-override path) | [`0xe557a0fc…be482a177`](https://testnet.snowtrace.io/tx/0xe557a0fc36d96f663406baf2a5129c2982518485e5e65b1f2f17cbece482a177) |
+
+confirming the new `dex: "v2"` gas-override path works in production code,
+not just the standalone proof scripts.

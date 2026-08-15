@@ -14,11 +14,16 @@ import { encodeHook, TOKEN_MESSENGER_ABI, USDC_ABI } from "@cctp-sdk/core";
 import {
   LEGS,
   POOL_SLOT0_ABI,
+  PAIR_RESERVES_ABI,
   SWAP_AND_BURN_ABI,
+  SWAP_AND_BURN_V2_ABI,
   SWAP_USDC_TO_NATIVE_ABI,
+  SWAP_USDC_TO_NATIVE_V2_ABI,
   ZERO_BYTES32,
   quoteEthToUsdc,
   quoteUsdcToEth,
+  quoteEthToUsdcV2,
+  quoteUsdcToEthV2,
 } from "@/lib/legs";
 import type { SwapRow } from "@/lib/db";
 
@@ -40,7 +45,9 @@ export function useFastFee(from: string, to: string): bigint | null {
 /**
  * Spot-quote of the entered amount in USDC (µ). On Arc the amount field
  * already means USDC (its native token), so this is a straight unit
- * conversion — no pool exists to quote against.
+ * conversion — no pool exists to quote against. On Avalanche (dex "v2")
+ * the quote comes from a Uniswap-V2-style pair's reserves instead of a V3
+ * pool's sqrtPriceX96.
  */
 export function useUsdcEstimate(from: string, amount: string): bigint | null {
   const source = LEGS[from];
@@ -63,12 +70,21 @@ export function useUsdcEstimate(from: string, amount: string): bigint | null {
     }
     if (!publicClient) return;
     let stale = false;
-    publicClient
-      .readContract({ address: source.pool!, abi: POOL_SLOT0_ABI, functionName: "slot0" })
-      .then((slot0) => {
-        if (!stale) setEstimate(quoteEthToUsdc(wei, slot0[0], source.token0IsUsdc!));
-      })
-      .catch(() => {});
+    if (source.dex === "v2") {
+      publicClient
+        .readContract({ address: source.pool!, abi: PAIR_RESERVES_ABI, functionName: "getReserves" })
+        .then((r) => {
+          if (!stale) setEstimate(quoteEthToUsdcV2(wei, r[0], r[1], source.token0IsUsdc!));
+        })
+        .catch(() => {});
+    } else {
+      publicClient
+        .readContract({ address: source.pool!, abi: POOL_SLOT0_ABI, functionName: "slot0" })
+        .then((slot0) => {
+          if (!stale) setEstimate(quoteEthToUsdc(wei, slot0[0], source.token0IsUsdc!));
+        })
+        .catch(() => {});
+    }
     return () => {
       stale = true;
     };
@@ -113,12 +129,21 @@ export function useReceiveEstimate(
     }
     if (!publicClient) return;
     let stale = false;
-    publicClient
-      .readContract({ address: dest.pool!, abi: POOL_SLOT0_ABI, functionName: "slot0" })
-      .then((slot0) => {
-        if (!stale) setEstimate(quoteUsdcToEth(net, slot0[0], dest.token0IsUsdc!));
-      })
-      .catch(() => {});
+    if (dest.dex === "v2") {
+      publicClient
+        .readContract({ address: dest.pool!, abi: PAIR_RESERVES_ABI, functionName: "getReserves" })
+        .then((r) => {
+          if (!stale) setEstimate(quoteUsdcToEthV2(net, r[0], r[1], dest.token0IsUsdc!));
+        })
+        .catch(() => {});
+    } else {
+      publicClient
+        .readContract({ address: dest.pool!, abi: POOL_SLOT0_ABI, functionName: "slot0" })
+        .then((slot0) => {
+          if (!stale) setEstimate(quoteUsdcToEth(net, slot0[0], dest.token0IsUsdc!));
+        })
+        .catch(() => {});
+    }
     return () => {
       stale = true;
     };
@@ -260,6 +285,46 @@ export function useSwapFlow() {
             maxPriorityFeePerGas: 1_000_000n,
           }
         : {};
+      // Avalanche Fuji's public RPC intermittently misestimates gas for
+      // contract-to-contract calls ("exceeds block gas limit" on a call that
+      // works fine with an explicit limit) — bypass automatic estimation.
+      // Only matters when the burn call itself runs on Fuji (source); a
+      // Fuji *destination* only affects the server-side relay, handled in
+      // relayer.ts.
+      const gasOverride = source.dex === "v2" ? { gas: 800_000n } : {};
+
+      // Shared hook target: mint straight to the user's own address with no
+      // hook when the destination is Arc (nothing to swap into — hookData
+      // must still be non-empty since TokenMessenger's WithHook variant
+      // rejects empty data, but it's never decoded there); otherwise a hook
+      // into the destination's swapUsdcToNative, using the V2-shaped ABI
+      // (no poolFee param) when the destination is the Uniswap-V2-style
+      // Avalanche deployment.
+      const mintRecipient = dest.nativeIsUsdc ? address! : dest.executor!;
+      const mintRecipientBytes32 = padHex(mintRecipient, { size: 32 });
+      const destinationCaller = dest.nativeIsUsdc
+        ? ZERO_BYTES32
+        : padHex(dest.executor!, { size: 32 });
+      const hookData = dest.nativeIsUsdc
+        ? ("0x00" as const)
+        : encodeHook({
+            target: dest.executor!,
+            calldata:
+              dest.dex === "v2"
+                ? encodeFunctionData({
+                    abi: SWAP_USDC_TO_NATIVE_V2_ABI,
+                    functionName: "swapUsdcToNative",
+                    // amountIn=0: swap all minted USDC. minOut=1: testnet pools carry
+                    // arbitrary prices; production quoting sets a real slippage floor.
+                    args: [0n, 1n, address!],
+                  })
+                : encodeFunctionData({
+                    abi: SWAP_USDC_TO_NATIVE_ABI,
+                    functionName: "swapUsdcToNative",
+                    args: [0n, dest.poolFee!, 1n, address!],
+                  }),
+            forwardAmount: 0n,
+          });
 
       let hash: `0x${string}`;
 
@@ -285,17 +350,6 @@ export function useSwapFlow() {
           await sourcePublicClient!.waitForTransactionReceipt({ hash: approveHash });
         }
 
-        const hook = encodeHook({
-          target: dest.executor!,
-          calldata: encodeFunctionData({
-            abi: SWAP_USDC_TO_NATIVE_ABI,
-            functionName: "swapUsdcToNative",
-            args: [0n, dest.poolFee!, 1n, address!],
-          }),
-          forwardAmount: 0n,
-        });
-        const executorBytes32 = padHex(dest.executor!, { size: 32 });
-
         hash = await writeContractAsync({
           address: source.tokenMessenger!,
           abi: TOKEN_MESSENGER_ABI,
@@ -303,40 +357,28 @@ export function useSwapFlow() {
           args: [
             usdcAmount,
             dest.domain,
-            executorBytes32,
+            mintRecipientBytes32,
             source.usdc!,
-            executorBytes32,
+            destinationCaller,
             fee,
             1000,
-            hook,
+            hookData,
           ],
           chainId: source.chain.id,
         });
+      } else if (source.dex === "v2") {
+        // Avalanche as source: SwapAndBurnUniV2 — same shape as SwapAndBurn
+        // but no poolFee param (Uniswap-V2-style routers have no fee tiers).
+        hash = await writeContractAsync({
+          address: source.swapAndBurn!,
+          abi: SWAP_AND_BURN_V2_ABI,
+          functionName: "swapAndBurnNative",
+          args: [1n, dest.domain, mintRecipientBytes32, destinationCaller, fee, 1000, hookData],
+          value: parseEther(amount || "0"),
+          chainId: source.chain.id,
+          ...gasOverride,
+        });
       } else {
-        // Standard SwapAndBurn path. When the destination is Arc there's no
-        // executor to swap into — mint straight to the user's own address,
-        // no hook. TokenMessenger's WithHook variant rejects empty hookData,
-        // so pass an inert byte; the relayer calls plain receiveMessage for
-        // an Arc destination, so it's never decoded or executed.
-        const mintRecipient = dest.nativeIsUsdc ? address! : dest.executor!;
-        const mintRecipientBytes32 = padHex(mintRecipient, { size: 32 });
-        const destinationCaller = dest.nativeIsUsdc
-          ? ZERO_BYTES32
-          : padHex(dest.executor!, { size: 32 });
-        const hookData = dest.nativeIsUsdc
-          ? ("0x00" as const)
-          : encodeHook({
-              target: dest.executor!,
-              calldata: encodeFunctionData({
-                abi: SWAP_USDC_TO_NATIVE_ABI,
-                functionName: "swapUsdcToNative",
-                // amountIn=0: swap all minted USDC. minOut=1: testnet pools carry
-                // arbitrary prices; production quoting sets a real slippage floor.
-                args: [0n, dest.poolFee!, 1n, address!],
-              }),
-              forwardAmount: 0n,
-            });
-
         hash = await writeContractAsync({
           address: source.swapAndBurn!,
           abi: SWAP_AND_BURN_ABI,

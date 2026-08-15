@@ -297,15 +297,17 @@ dev default). See `frontend/.env.local` for the full list.
 
 ## Next Steps
 
-**Avalanche is live** — `SwapAndBurnUniV2`/`ReceiveAndSwapUniV2`, routing
-through Pangolin's Uniswap-V2-style router since Uniswap V3 isn't deployed
-on Fuji. Getting there took real investigation: Trader Joe's more-liquid
-legacy router reverts on every real swap despite quoting fine, so the
-working venue ended up being a thinner but genuinely functional Pangolin
-pool. Full story and proofs in [DEPLOYMENTS.md](./DEPLOYMENTS.md). Not yet
-wired into the frontend UI — it needs its own quote math (constant-product
-reserve pricing, not Uniswap V3's `sqrtPriceX96`) and hook encoding (no
-fee-tier parameter), distinct from every other chain's V3-based flow.
+**Avalanche is live, in the contracts and the app.** `SwapAndBurnUniV2`/
+`ReceiveAndSwapUniV2` route through Pangolin's Uniswap-V2-style router since
+Uniswap V3 isn't deployed on Fuji. Getting there took real investigation:
+Trader Joe's more-liquid legacy router reverts on every real swap despite
+quoting fine, so the working venue ended up being a thinner but genuinely
+functional Pangolin pool. It's also the first chain whose frontend
+integration needed real branching logic, not just a config entry — a new
+`dex: "v2"` field switches the quote math (constant-product reserves
+instead of `sqrtPriceX96`) and the ABI shape (no fee-tier parameter) for
+both the swap card's live quoting and the swap/relay calls themselves.
+Full story and proofs in [DEPLOYMENTS.md](./DEPLOYMENTS.md).
 
 **Stellar (XLM)** is next — the other half of the original target corridor
 (a non-custodial AVAX → XLM route doesn't exist anywhere today, and Stellar
