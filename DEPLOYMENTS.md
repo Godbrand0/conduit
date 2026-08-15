@@ -226,3 +226,44 @@ Both runs used the 0.05%-fee `SwapAndBurn`; Unichain → Base additionally
 proves the destination-side `ReceiveAndSwap` hook execution on a 6th
 distinct chain with a non-canonical router address, without any code
 changes beyond the deploy-script config.
+
+### #12 & #13 — Avalanche Fuji ↔ Base Sepolia (2026-08-06, 7th chain, new contract variant)
+
+Avalanche is the first chain that needed genuinely new contracts, not just a
+deploy-script config entry — Uniswap V3 isn't deployed on Fuji at all. Added
+`SwapAndBurnUniV2.sol` / `ReceiveAndSwapUniV2.sol`: identical fee/hook/refund
+logic to the V3 contracts, but swapping through a Uniswap-V2-style path-based
+router (`swapExactAVAXForTokens`/`swapExactTokensForAVAX`) instead of V3's
+`exactInputSingle`. 14 new Foundry tests, same coverage shape as the V3 suite.
+
+Finding a *working* DEX took real investigation. Trader Joe's legacy V1
+router (`0xd7f6…A901`) has a real, confirmed WAVAX/USDC pair — but every
+state-changing swap against it reverts with no reason, even called directly
+(not through our contract), while its own `getAmountsOut` quote function
+works fine. Circle's actual USDC has zero liquidity on Trader Joe's modern
+V2.2 LBRouter. The working venue turned out to be **Pangolin**
+(`0x2D99…B921`, confirmed via `factory()`/`WAVAX()` and a real executed
+swap) — real, healthy two-sided liquidity (~496 USDC / ~43.6 WAVAX), and it
+only implements the Avalanche-native function names
+(`swapExact*AVAX*For*`, not `*ETH*`), which the interface reflects.
+
+| Contract | Address |
+|---|---|
+| SwapAndBurnUniV2 | [`0x9AcD57857367494eb6CB02Bd2241Cc78FdCdDe8b`](https://testnet.snowtrace.io/address/0x9AcD57857367494eb6CB02Bd2241Cc78FdCdDe8b) |
+| ReceiveAndSwapUniV2 | [`0x064B35CA8f0886A10eD7C43E29D558E66b0dea36`](https://testnet.snowtrace.io/address/0x064B35CA8f0886A10eD7C43E29D558E66b0dea36) |
+
+| Direction | Burn tx | Relay tx | Result |
+|---|---|---|---|
+| Fuji → Base (full native-to-native) | [`0x455e6223…a34abf23`](https://testnet.snowtrace.io/tx/0x455e62233c5300d29f7d5ce81781154f735042ac7eeeb2261d69bb31a34abf23) | [`0x903caee9…4e4dcf53`](https://sepolia.basescan.org/tx/0x903caee94d0f48ed3a2609847da680bc6b2549f44944032e93e420154e4dcf53) | 0.005 AVAX → **0.000333605170089195 ETH** |
+| Base → Fuji (reverse route, 0.05% fee) | [`0xcbcd8cda…f62f9b46`](https://sepolia.basescan.org/tx/0xcbcd8cdad9d3d4f562edffe9e6466fdb20ad642c05980037ce54030cf62f9b46) | [`0xf0714051…49bde0b8`](https://testnet.snowtrace.io/tx/0xf0714051923a972fdbc5f027b9848b006c1a998db3372993bb72bbc349bde0b8) | 0.015 ETH → **0.219468797764207856 AVAX** |
+
+Known limitation: the backing pool is real but thin relative to Base/Arbitrum
+(~$500-notional at unrealistic testnet pricing, vs. thousands elsewhere), so
+swap amounts here are deliberately small. Would very likely work unchanged
+against mainnet Trader Joe or Pangolin, which are heavily-used production
+routers — this looks like a testnet-maintenance issue (Trader Joe's V1
+router) or thin-testnet-liquidity issue (Pangolin), not a flaw in the
+contract pattern itself. Also note: `Avalanche Fuji's public RPC (like Arc's
+and Unichain's) required an explicit gas limit on the swap+burn and relay
+calls — automatic gas estimation intermittently reported "exceeds block gas
+limit" for these specific contract-to-contract calls.

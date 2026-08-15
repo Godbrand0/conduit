@@ -6,7 +6,7 @@
 
 ![Status](https://img.shields.io/badge/status-live%20on%20testnet-green)
 ![Protocol](https://img.shields.io/badge/protocol-CCTP%20V2-blue)
-![Chains](https://img.shields.io/badge/chains-6-purple)
+![Chains](https://img.shields.io/badge/chains-7-purple)
 ![License](https://img.shields.io/badge/license-MIT-orange)
 
 **Live app:** https://conduit-sandy.vercel.app
@@ -127,11 +127,19 @@ for every transaction hash.
 | Ethereum Sepolia | [`0x9A732afcA3Fbc0FB9a0dDF677dC1c35549499766`](https://sepolia.etherscan.io/address/0x9A732afcA3Fbc0FB9a0dDF677dC1c35549499766) | [`0x226EC562076549FdD16ecaaF437CD77E49D102c5`](https://sepolia.etherscan.io/address/0x226EC562076549FdD16ecaaF437CD77E49D102c5) |
 | OP Sepolia | [`0x84B1634Ec67d309AEB9DC422F001350e467DCBc8`](https://sepolia-optimism.etherscan.io/address/0x84B1634Ec67d309AEB9DC422F001350e467DCBc8) | [`0xAead88469c8DBdA0efd12c6993eDCb2F171D8203`](https://sepolia-optimism.etherscan.io/address/0xAead88469c8DBdA0efd12c6993eDCb2F171D8203) |
 | Unichain Sepolia | [`0xcc5b18B89C7709EeB840c2cA4875c39e17d57c21`](https://sepolia.uniscan.xyz/address/0xcc5b18B89C7709EeB840c2cA4875c39e17d57c21) | [`0x60D6EDA1573f13268f5a925CB8ECabe00ABB2C6f`](https://sepolia.uniscan.xyz/address/0x60D6EDA1573f13268f5a925CB8ECabe00ABB2C6f) |
+| Avalanche Fuji | [`0x9AcD57857367494eb6CB02Bd2241Cc78FdCdDe8b`](https://testnet.snowtrace.io/address/0x9AcD57857367494eb6CB02Bd2241Cc78FdCdDe8b) † | [`0x064B35CA8f0886A10eD7C43E29D558E66b0dea36`](https://testnet.snowtrace.io/address/0x064B35CA8f0886A10eD7C43E29D558E66b0dea36) † |
 | Arc Testnet | *none — direct CCTP `TokenMessenger`* | *none — direct CCTP `MessageTransmitter`* |
 
+† Avalanche's contracts are a distinct variant — `SwapAndBurnUniV2`/
+`ReceiveAndSwapUniV2` — since Uniswap V3 isn't deployed on Fuji. They swap
+through Pangolin's Uniswap-V2-style router instead of V3's
+`exactInputSingle`; same fee/hook/refund logic otherwise. See
+[DEPLOYMENTS.md](./DEPLOYMENTS.md) for why (Trader Joe's more-liquid V1
+router reverts on every real swap; Pangolin's thinner pool actually works).
+
 Every `SwapAndBurn` charges a 0.05% Conduit fee (`FEE_BPS = 5`), skimmed
-before the CCTP burn. All four are fee-enabled v2 deployments; the
-`ReceiveAndSwap` executors are also v2 (in-swap USDC refunds on
+before the CCTP burn. All four V3 deployments are fee-enabled v2
+deployments; the `ReceiveAndSwap` executors are also v2 (in-swap USDC refunds on
 partial-fill, `amountIn = 0` meaning "swap everything just minted").
 
 ---
@@ -198,7 +206,7 @@ Every route above has a real, verifiable transaction — burn hash, relay
 hash, and delivered amount — recorded in
 **[DEPLOYMENTS.md](./DEPLOYMENTS.md)**. Highlights:
 
-- Full bidirectional native-to-native swaps across all 5 standard
+- Full bidirectional native-to-native swaps across all 5 Uniswap-V3-based
   chains, including the fee-enabled flow (0.05% Conduit fee visibly
   skimmed on-chain).
 - Arc Testnet proven in both directions — Arc → Base in ~13 seconds
@@ -206,6 +214,11 @@ hash, and delivered amount — recorded in
 - Unichain Sepolia proven in both directions, with its real
   (non-canonical) SwapRouter02 address found by tracing a live pool's
   swap events rather than trusting a documented address.
+- Avalanche Fuji proven in both directions through a distinct
+  Uniswap-V2-style contract variant, after finding that the
+  higher-liquidity DEX (Trader Joe's legacy router) reverts on every
+  real swap despite quoting correctly — Pangolin's thinner pool turned
+  out to be the one that actually works.
 - The live frontend's relayer verified against a running production
   server, not just standalone scripts.
 
@@ -284,25 +297,26 @@ dev default). See `frontend/.env.local` for the full list.
 
 ## Next Steps
 
-**Avalanche and Stellar (XLM)** are next on the roadmap — the original
-target corridor for this project, and still the most product-compelling
-one: Stellar is the settlement rail behind MoneyGram's 475,000-location
-cash network, and a non-custodial AVAX → XLM route doesn't exist
-anywhere today.
+**Avalanche is live** — `SwapAndBurnUniV2`/`ReceiveAndSwapUniV2`, routing
+through Pangolin's Uniswap-V2-style router since Uniswap V3 isn't deployed
+on Fuji. Getting there took real investigation: Trader Joe's more-liquid
+legacy router reverts on every real swap despite quoting fine, so the
+working venue ended up being a thinner but genuinely functional Pangolin
+pool. Full story and proofs in [DEPLOYMENTS.md](./DEPLOYMENTS.md). Not yet
+wired into the frontend UI — it needs its own quote math (constant-product
+reserve pricing, not Uniswap V3's `sqrtPriceX96`) and hook encoding (no
+fee-tier parameter), distinct from every other chain's V3-based flow.
 
-- **Avalanche (Fuji)** is the more straightforward addition: CCTP V2 is
-  live there, but Uniswap V3 isn't officially deployed on the testnet —
-  the source/destination swap will route through Trader Joe (LFJ)
-  instead, which needs a new `SwapAndBurn`/`ReceiveAndSwap` variant
-  built against its swap interface rather than reusing the existing
-  Uniswap-V3-based contracts as-is.
-- **Stellar** is the larger lift: it's non-EVM, so it needs Soroban
-  contracts (Rust) rather than Solidity, integrates through Circle's
-  `CctpForwarder` rather than a standard EVM hook, and swaps
-  USDC → XLM via Stellar's native SDEX path-payment primitive instead of
-  a Uniswap-style pool. This is genuinely new infrastructure, not a
-  config addition — but Arc proved the pattern of "adapt the model to
-  the chain's real primitives" works well.
+**Stellar (XLM)** is next — the other half of the original target corridor
+(a non-custodial AVAX → XLM route doesn't exist anywhere today, and Stellar
+is the settlement rail behind MoneyGram's 475,000-location cash network).
+It's the largest remaining lift: non-EVM, so it needs Soroban contracts
+(Rust) rather than Solidity, integrates through Circle's `CctpForwarder`
+rather than a standard EVM hook, and swaps USDC → XLM via Stellar's native
+SDEX path-payment primitive instead of a Uniswap-style pool. Genuinely new
+infrastructure, not a config addition — but Arc and Avalanche both proved
+the pattern of "adapt the model to the chain's real primitives, verified
+on-chain before writing contract code" works.
 
 Other chains under evaluation follow the same bar every chain here met:
 real CCTP V2 support *and* a verified, liquid swap venue, checked
