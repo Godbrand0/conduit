@@ -42,7 +42,9 @@ export default function Home() {
                 steps={flow.steps}
                 serverSwap={flow.serverSwap}
                 destLabel={flow.trackedDest.label}
-                destIsUsdc={flow.trackedDest.nativeIsUsdc}
+                destUnit={
+                  flow.trackedDest.nativeIsUsdc ? "USDC" : flow.trackedDest.chain.nativeCurrency.symbol
+                }
               />
             )}
 

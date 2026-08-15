@@ -28,7 +28,11 @@ interface SwapCardProps {
 const fmtEth = (wei: bigint, digits = 5) =>
   Number(formatEther(wei)).toLocaleString(undefined, { maximumFractionDigits: digits });
 
-const unitFor = (chainKey: string) => (LEGS[chainKey]?.nativeIsUsdc ? "USDC" : "ETH");
+const unitFor = (chainKey: string) => {
+  const leg = LEGS[chainKey];
+  if (!leg) return "ETH";
+  return leg.nativeIsUsdc ? "USDC" : leg.chain.nativeCurrency.symbol;
+};
 
 export function SwapCard({
   from,

@@ -7,10 +7,12 @@ interface StatusTrackerProps {
   steps: SwapStep[];
   serverSwap: SwapRow | null;
   destLabel: string;
-  destIsUsdc?: boolean;
+  /** "USDC" on Arc, or the destination chain's native currency symbol
+   *  (ETH, AVAX, …) everywhere else. */
+  destUnit: string;
 }
 
-export function StatusTracker({ steps, serverSwap, destLabel, destIsUsdc }: StatusTrackerProps) {
+export function StatusTracker({ steps, serverSwap, destLabel, destUnit }: StatusTrackerProps) {
   return (
     <div className="mt-5 space-y-3 rounded-2xl border border-white/5 bg-[var(--card)] p-5 shadow-2xl shadow-black/40">
       {steps.map((s) => (
@@ -41,7 +43,7 @@ export function StatusTracker({ steps, serverSwap, destLabel, destIsUsdc }: Stat
       ))}
       {serverSwap?.status === "COMPLETE" && (
         <p className="pt-1 text-sm text-emerald-400">
-          Native {destIsUsdc ? "USDC" : "ETH"} delivered on {destLabel}. You can close this tab
+          Native {destUnit} delivered on {destLabel}. You can close this tab
           any time — the relayer finishes without you.
         </p>
       )}

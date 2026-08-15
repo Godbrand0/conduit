@@ -226,10 +226,10 @@ export function useSwapFlow() {
     const complete = serverSwap?.status === "COMPLETE";
     const burnLabel = trackedSource.nativeIsUsdc
       ? `Burn native USDC on ${trackedSource.label}`
-      : `Swap ETH → USDC + burn on ${trackedSource.label}`;
+      : `Swap ${trackedSource.chain.nativeCurrency.symbol} → USDC + burn on ${trackedSource.label}`;
     const mintLabel = trackedDest.nativeIsUsdc
       ? `Mint native USDC on ${trackedDest.label}`
-      : `Mint + swap USDC → ETH on ${trackedDest.label}`;
+      : `Mint + swap USDC → ${trackedDest.chain.nativeCurrency.symbol} on ${trackedDest.label}`;
     return [
       {
         label: burnLabel,
