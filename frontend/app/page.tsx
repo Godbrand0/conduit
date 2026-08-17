@@ -28,7 +28,7 @@ export default function Home() {
               reverse={flow.reverse}
               maxFee={flow.maxFee}
               usdcEstimate={flow.usdcEstimate}
-              receiveEstimate={flow.receiveEstimate}
+              quote={flow.quote}
               balance={flow.balance}
               onSwap={flow.swap}
               signing={flow.signing}

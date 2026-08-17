@@ -93,38 +93,74 @@ export function useUsdcEstimate(from: string, amount: string): bigint | null {
   return estimate;
 }
 
+export type Quote = {
+  /** 18-decimal ("wei-equivalent") estimate of what lands on the
+   *  destination, so formatEther() works universally. Null while the quote
+   *  is still loading — never a guessed/placeholder value. */
+  estimate: bigint | null;
+  /** µUSDC actually deducted for the 0.05% Conduit fee. Null while loading. */
+  conduitFeeUsdc: bigint | null;
+  /** µUSDC actually deducted for Circle's fast-transfer fee. Null while
+   *  the real quote from /api/fee hasn't arrived yet — never guessed. */
+  circleFeeUsdc: bigint | null;
+  /** µUSDC left to bridge after both fees. Null while loading. */
+  netUsdc: bigint | null;
+  /** True only once we have the REAL fee and it exceeds the amount sent —
+   *  never set from a guessed/fallback fee. */
+  tooSmall: boolean;
+};
+
+const LOADING_QUOTE: Quote = {
+  estimate: null,
+  conduitFeeUsdc: null,
+  circleFeeUsdc: null,
+  netUsdc: null,
+  tooSmall: false,
+};
+
 /**
- * Estimated amount received on the destination, always returned as an
- * 18-decimal ("wei-equivalent") bigint so formatEther() works universally —
- * on a normal chain that's native ETH from the destination pool; on Arc
- * it's the µUSDC net amount scaled back up, since Arc's native balance IS
- * USDC and needs no swap. The 0.05% Conduit fee only applies when the
- * source goes through SwapAndBurn (skipped when the source is Arc, since
- * that path burns directly from the EOA with no Conduit contract involved).
+ * Estimated amount received on the destination, plus the fee breakdown that
+ * produced it. On Arc as destination the "estimate" is the µUSDC net amount
+ * scaled back up to 18 decimals, since Arc's native balance IS USDC and
+ * needs no swap. The 0.05% Conduit fee only applies when the source goes
+ * through SwapAndBurn (skipped when the source is Arc, since that path
+ * burns directly from the EOA with no Conduit contract involved).
+ *
+ * Deliberately waits for the real Circle fee before computing anything —
+ * an earlier version fell back to a guessed 1.3 USDC fee while /api/fee was
+ * still loading, which for a small amount (e.g. 1 USDC) could show a false
+ * "0" before the real (possibly much lower, even zero) fee arrived.
  */
 export function useReceiveEstimate(
   from: string,
   to: string,
   usdcEstimate: bigint | null,
   fastFee: bigint | null
-): bigint | null {
+): Quote {
   const source = LEGS[from];
   const dest = LEGS[to];
   const publicClient = usePublicClient({ chainId: dest.chain.id });
-  const [estimate, setEstimate] = useState<bigint | null>(null);
+  const [quote, setQuote] = useState<Quote>(LOADING_QUOTE);
 
   useEffect(() => {
-    setEstimate(null);
-    if (usdcEstimate === null) return;
+    setQuote(LOADING_QUOTE);
+    if (usdcEstimate === null || fastFee === null) return;
     const conduitFee = source.nativeIsUsdc ? 0n : (usdcEstimate * 5n) / 10_000n;
-    const net = usdcEstimate - conduitFee - (fastFee ?? 1_300_000n);
+    const net = usdcEstimate - conduitFee - fastFee;
     if (net <= 0n) {
-      setEstimate(0n);
+      setQuote({
+        estimate: 0n,
+        conduitFeeUsdc: conduitFee,
+        circleFeeUsdc: fastFee,
+        netUsdc: 0n,
+        tooSmall: true,
+      });
       return;
     }
+    const breakdown = { conduitFeeUsdc: conduitFee, circleFeeUsdc: fastFee, netUsdc: net, tooSmall: false };
 
     if (dest.nativeIsUsdc) {
-      setEstimate(net * NATIVE_TO_USDC_SCALE);
+      setQuote({ estimate: net * NATIVE_TO_USDC_SCALE, ...breakdown });
       return;
     }
     if (!publicClient) return;
@@ -133,14 +169,14 @@ export function useReceiveEstimate(
       publicClient
         .readContract({ address: dest.pool!, abi: PAIR_RESERVES_ABI, functionName: "getReserves" })
         .then((r) => {
-          if (!stale) setEstimate(quoteUsdcToEthV2(net, r[0], r[1], dest.token0IsUsdc!));
+          if (!stale) setQuote({ estimate: quoteUsdcToEthV2(net, r[0], r[1], dest.token0IsUsdc!), ...breakdown });
         })
         .catch(() => {});
     } else {
       publicClient
         .readContract({ address: dest.pool!, abi: POOL_SLOT0_ABI, functionName: "slot0" })
         .then((slot0) => {
-          if (!stale) setEstimate(quoteUsdcToEth(net, slot0[0], dest.token0IsUsdc!));
+          if (!stale) setQuote({ estimate: quoteUsdcToEth(net, slot0[0], dest.token0IsUsdc!), ...breakdown });
         })
         .catch(() => {});
     }
@@ -149,7 +185,7 @@ export function useReceiveEstimate(
     };
   }, [usdcEstimate, fastFee, source, dest, publicClient]);
 
-  return estimate;
+  return quote;
 }
 
 export type SwapStep = {
@@ -184,7 +220,7 @@ export function useSwapFlow() {
   const sourcePublicClient = usePublicClient({ chainId: source.chain.id });
   const maxFee = useFastFee(from, to);
   const usdcEstimate = useUsdcEstimate(from, amount);
-  const receiveEstimate = useReceiveEstimate(from, to, usdcEstimate, maxFee);
+  const quote = useReceiveEstimate(from, to, usdcEstimate, maxFee);
   const { data: balance } = useBalance({ address, chainId: source.chain.id });
 
   // The tracked swap's own route (may differ from the selectors, e.g. when
@@ -430,7 +466,7 @@ export function useSwapFlow() {
     // quote
     maxFee,
     usdcEstimate,
-    receiveEstimate,
+    quote,
     balance: balance?.value ?? null,
     // execution + tracking
     swap,
