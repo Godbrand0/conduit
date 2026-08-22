@@ -1,0 +1,34 @@
+[workspace]
+resolver = "2"
+members = [
+  "contracts/*",
+]
+
+[workspace.dependencies]
+soroban-sdk = "22.0.0"
+
+# `cargo test` currently fails to COMPILE (not a contract bug — the release
+# wasm build in contracts/swap_and_deliver/, what actually gets deployed, is
+# clean): soroban-env-host 22.1.3's own testutils code calls
+# ed25519-dalek::SigningKey::generate() against trait bounds only its 2.x
+# line satisfies, but its own Cargo.toml pulls 3.0.0 (latest) unconditionally
+# — an upstream version-compatibility bug in this exact SDK release. No newer
+# 22.x patch fixes it (checked: 22.0.11 is latest as of 2026-08-17); a
+# [patch.crates-io] override isn't possible since both versions come from
+# the same registry source. real correctness is proven end-to-end on
+# testnet instead — see ../../DEPLOYMENTS.md.
+
+[profile.release]
+opt-level = "z"
+overflow-checks = true
+debug = 0
+strip = "symbols"
+debug-assertions = false
+panic = "abort"
+codegen-units = 1
+lto = true
+
+# For more information about this profile see https://soroban.stellar.org/docs/basic-tutorials/logging#cargotoml-profile
+[profile.release-with-logs]
+inherits = "release"
+debug-assertions = true

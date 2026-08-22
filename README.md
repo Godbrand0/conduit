@@ -6,7 +6,7 @@
 
 ![Status](https://img.shields.io/badge/status-live%20on%20testnet-green)
 ![Protocol](https://img.shields.io/badge/protocol-CCTP%20V2-blue)
-![Chains](https://img.shields.io/badge/chains-7-purple)
+![Chains](https://img.shields.io/badge/chains-8-purple)
 ![License](https://img.shields.io/badge/license-MIT-orange)
 
 **Live app:** https://conduit-sandy.vercel.app
@@ -129,6 +129,16 @@ for every transaction hash.
 | Unichain Sepolia | [`0xcc5b18B89C7709EeB840c2cA4875c39e17d57c21`](https://sepolia.uniscan.xyz/address/0xcc5b18B89C7709EeB840c2cA4875c39e17d57c21) | [`0x60D6EDA1573f13268f5a925CB8ECabe00ABB2C6f`](https://sepolia.uniscan.xyz/address/0x60D6EDA1573f13268f5a925CB8ECabe00ABB2C6f) |
 | Avalanche Fuji | [`0x9AcD57857367494eb6CB02Bd2241Cc78FdCdDe8b`](https://testnet.snowtrace.io/address/0x9AcD57857367494eb6CB02Bd2241Cc78FdCdDe8b) † | [`0x064B35CA8f0886A10eD7C43E29D558E66b0dea36`](https://testnet.snowtrace.io/address/0x064B35CA8f0886A10eD7C43E29D558E66b0dea36) † |
 | Arc Testnet | *none — direct CCTP `TokenMessenger`* | *none — direct CCTP `MessageTransmitter`* |
+| Stellar Testnet ‡ | *existing `SwapAndBurn` on any EVM chain, unmodified* | [`CBHP22SRJB4JXSDAQ6LKAZV72JLBL2GV7MCRVLYKO6GI7GKZ3XP5XPY6`](https://stellar.expert/explorer/testnet/contract/CBHP22SRJB4JXSDAQ6LKAZV72JLBL2GV7MCRVLYKO6GI7GKZ3XP5XPY6) (Soroban) |
+
+‡ Stellar is non-EVM (Soroban/Rust) and needed a genuinely new mechanism:
+Circle's `CctpForwarder` there can only forward USDC to a plain address, no
+atomic hook execution like EVM. Conduit's `swap_and_deliver` Soroban
+contract re-parses the same attested CCTP message a second time — the exact
+trustless pattern `ReceiveAndSwap.sol` uses on EVM — so the final Stellar
+recipient is cryptographically bound inside Circle's attestation, never
+supplied by whoever relays. Two on-chain steps, both permissionless, still
+just **one user signature**. Full story in [DEPLOYMENTS.md](./DEPLOYMENTS.md#15).
 
 † Avalanche's contracts are a distinct variant — `SwapAndBurnUniV2`/
 `ReceiveAndSwapUniV2` — since Uniswap V3 isn't deployed on Fuji. They swap
@@ -221,6 +231,9 @@ hash, and delivered amount — recorded in
   out to be the one that actually works.
 - The live frontend's relayer verified against a running production
   server, not just standalone scripts.
+- Stellar Testnet — first non-EVM chain — proven with a real Arbitrum ETH
+  → Stellar XLM transfer, fully trustless despite Circle's Stellar
+  contracts having no atomic hook execution, and still one signature.
 
 ---
 
@@ -309,16 +322,28 @@ instead of `sqrtPriceX96`) and the ABI shape (no fee-tier parameter) for
 both the swap card's live quoting and the swap/relay calls themselves.
 Full story and proofs in [DEPLOYMENTS.md](./DEPLOYMENTS.md).
 
-**Stellar (XLM)** is next — the other half of the original target corridor
-(a non-custodial AVAX → XLM route doesn't exist anywhere today, and Stellar
-is the settlement rail behind MoneyGram's 475,000-location cash network).
-It's the largest remaining lift: non-EVM, so it needs Soroban contracts
-(Rust) rather than Solidity, integrates through Circle's `CctpForwarder`
-rather than a standard EVM hook, and swaps USDC → XLM via Stellar's native
-SDEX path-payment primitive instead of a Uniswap-style pool. Genuinely new
-infrastructure, not a config addition — but Arc and Avalanche both proved
-the pattern of "adapt the model to the chain's real primitives, verified
-on-chain before writing contract code" works.
+**Stellar (XLM) is live** — the other half of the original target corridor
+(a non-custodial AVAX → XLM route didn't exist anywhere before this).
+Non-EVM, Soroban/Rust, and the biggest architectural departure of any chain
+yet: Circle's `CctpForwarder` there can't execute a hook atomically like EVM
+can, so the natural "just have the user sign twice" fallback was deliberately
+rejected in favor of a fully trustless two-step design — Conduit's own
+`swap_and_deliver` Soroban contract re-parses the same attested CCTP message
+a second time to find the real recipient, cryptographically bound inside
+Circle's attestation rather than trusted from whoever relays. Two real
+Soroban-specific obstacles surfaced and got fixed along the way, not
+assumed away: classic SDEX orderbook liquidity turned out to be
+unreachable from inside a smart contract at all (switched to Soroswap, a
+Soroban-native AMM, verified with real reserves first), and Soroswap's own
+router does a nested cross-contract transfer that Soroban's auth model
+rejects — worked around by calling the underlying pair directly with
+Uniswap V2's low-level "optimistic transfer" pattern. Proven live: Arbitrum
+Sepolia ETH → Stellar XLM, one signature, no wrapped tokens. Full story in
+[DEPLOYMENTS.md](./DEPLOYMENTS.md#15). Not yet wired into the frontend UI.
+
+Both Arc and Avalanche before it proved the same discipline: adapt the
+model to each chain's real primitives, verified on-chain before writing
+contract code, never assumed from documentation.
 
 Other chains under evaluation follow the same bar every chain here met:
 real CCTP V2 support *and* a verified, liquid swap venue, checked

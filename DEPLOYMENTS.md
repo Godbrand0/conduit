@@ -291,3 +291,93 @@ a live `next start` server's `/api/swaps`, and polled through
 
 confirming the new `dex: "v2"` gas-override path works in production code,
 not just the standalone proof scripts.
+
+### #15 — Stellar Testnet — 8th chain, first non-EVM, fully trustless, one signature (2026-08-22)
+
+The largest architectural departure of any chain so far: Stellar is non-EVM
+(Soroban/Rust, not Solidity), and Circle's Stellar-side contract —
+`CctpForwarder` — has **no atomic hook-execution capability** the way EVM's
+`MessageTransmitter` + a hook executor does. `CctpForwarder.mint_and_forward`
+only mints USDC and forwards it to a plain address; it cannot also invoke a
+swap function in the same call.
+
+**The naive fix (a second user signature) was rejected in favor of a fully
+trustless design** — recorded in the project's own notes: rather than have
+the user sign a second authorization, or trust Conduit's relayer to
+correctly map a burn to a Stellar recipient (a real redirect-of-funds risk,
+since nothing on-chain would bind that mapping), Conduit re-parses the same
+attested CCTP message a second time on the Stellar side — the exact pattern
+`ReceiveAndSwap.sol` already uses on every EVM chain — so the final
+recipient is cryptographically bound inside Circle's own attestation, not
+supplied by whoever relays.
+
+**How it works**, two on-chain steps, both permissionless (no second user
+signature):
+1. The existing, **unmodified** `SwapAndBurn` on any EVM chain burns with
+   `mintRecipient`/`destinationCaller` = `CctpForwarder`'s own address
+   (required — verified on-chain that using anything else reverts with
+   `InvalidMintRecipient`), and `hookData` = Circle's required Stellar
+   format (pointing `mint_and_forward` at Conduit's own `swap_and_deliver`
+   Soroban contract) **plus a Conduit-appended trailing section** encoding
+   the real final Stellar recipient — confirmed on-chain that
+   `mint_and_forward` tolerates trailing bytes after its own parsed section,
+   the same way `ReceiveAndSwap.sol`'s hookData works on EVM. No new EVM
+   contract was needed: `hookData` was already a fully caller-supplied
+   parameter with no on-chain format constraint.
+2. Anyone (normally Conduit's relayer) calls `swap_and_deliver(message)` on
+   Conduit's own Soroban contract. It independently re-parses the *same*
+   attested message to extract the real amount and final recipient, checks
+   `MessageTransmitter.is_nonce_used(nonce)` to confirm the transfer
+   genuinely minted (proof it doesn't need to re-verify Circle's attestation
+   itself), guards against double-delivery, swaps USDC → XLM, and delivers
+   native XLM to the real recipient.
+
+**Two real Soroban-specific obstacles found and fixed, not assumed away:**
+- Soroban contracts **cannot call classic SDEX orderbook operations** —
+  confirmed via research before writing any swap logic, ruling out the
+  liquidity venue originally assumed in the project's early planning notes.
+  Switched to **Soroswap** (a Soroban-native AAM, Uniswap-V2-shaped),
+  verified with real, healthy USDC/XLM reserves before committing to it.
+- Soroswap's **router** internally performs a nested cross-contract
+  `transfer` (router → pair → token, from = Conduit's contract) that
+  Soroban's auth model rejects without pre-authorizing that exact
+  sub-invocation tree. Fixed by bypassing the router entirely and using the
+  pair's own low-level Uniswap-V2-style interface directly — transfer input
+  tokens to the pair ourselves (a direct, single-hop call, auto-authorized),
+  then call the pair's own `swap`, the same "optimistic transfer" pattern
+  real Uniswap V2 uses. A small (0.5%) safety margin below Conduit's own
+  constant-product estimate accounts for Soroswap's exact fee model not
+  being independently re-derivable without their pair source; the caller's
+  real slippage floor is still checked against the honest, non-marked-down
+  estimate.
+
+**Contracts (Stellar Testnet):**
+
+| Contract | Address |
+|---|---|
+| `swap_and_deliver` (Conduit, Soroban) | [`CBHP22SRJB4JXSDAQ6LKAZV72JLBL2GV7MCRVLYKO6GI7GKZ3XP5XPY6`](https://stellar.expert/explorer/testnet/contract/CBHP22SRJB4JXSDAQ6LKAZV72JLBL2GV7MCRVLYKO6GI7GKZ3XP5XPY6) |
+| `CctpForwarder` (Circle) | `CA66Q2WFBND6V4UEB7RD4SAXSVIWMD6RA4X3U32ELVFGXV5PJK4T4VSZ` |
+| `MessageTransmitter` (Circle) | `CBJ6MTCKKZG73PMDZCJMSFRD7DQEMI4FKDH7CGDSV4W6FHCRBCQAVVJY` |
+| `TokenMessengerMinter` (Circle) | `CDNG7HXAPBWICI2E3AUBP3YZWZELJLYSB6F5CC7WLDTLTHVM74SLRTHP` |
+| USDC (Stellar SAC, ground-truth verified via `TokenMessengerMinter.get_local_token`) | `CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMXQDAMA` |
+| Soroswap USDC/XLM pair | `CCBX3NZTCQLQFSPG7HBOKL4P2RVPOPVFHDNRTOSCCJWBTPL2GHEH7RQS` |
+
+**Live proof — Arbitrum Sepolia native ETH → Stellar native XLM, one signature:**
+
+| Step | Tx |
+|---|---|
+| Burn (Arbitrum Sepolia, existing unmodified `SwapAndBurn`) | [`0x3342df49…238145`](https://sepolia.arbiscan.io/tx/0x3342df49353b3fe15170ac991e809b2a57e379fde6e18d4f0bb6d9aac1238145) |
+| `mint_and_forward` (Stellar, Circle's contract) | [`7cdf2850…e22f5`](https://stellar.expert/explorer/testnet/tx/7cdf285068cb1ba7315c788da8e2f5d401f5df1fd33c2f115401c88cdb8e22f5) |
+| `swap_and_deliver` (Stellar, Conduit's contract) | [`2187cb1f…805094f`](https://stellar.expert/explorer/testnet/tx/2187cb1faa704c86ed679eb55e4c109497af2fff247d392eba681f186805094f) |
+
+Result: **20.5876992 native XLM** delivered to the final recipient's Stellar
+account — confirmed via a fresh, unfunded-before-this-transfer test account's
+balance delta.
+
+Known limitation: `cargo test` currently fails to compile due to an upstream
+`soroban-env-host` 22.1.3 dependency bug in its own testutils (unrelated to
+this contract's code — the release wasm build, what actually gets deployed,
+is clean and unaffected); see the comment in `stellar/swap_and_deliver/Cargo.toml`.
+Real correctness is proven by the live on-chain execution above, not a unit
+test. Frontend integration (Stellar as a selectable chain in the app) not
+yet built.

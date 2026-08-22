@@ -7,6 +7,7 @@
   },
   "dependencies": {
     "@cctp-sdk/core": "^0.2.0",
+    "@stellar/stellar-sdk": "^17.0.0",
     "dotenv": "^16.4.5",
     "tsx": "^4.19.0",
     "viem": "^2.21.0"
