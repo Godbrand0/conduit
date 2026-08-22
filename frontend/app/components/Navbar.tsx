@@ -2,6 +2,7 @@
 
 import React, { useState, useEffect } from "react";
 import { useAccount, useConnect, useDisconnect } from "wagmi";
+import { useStellarWallet } from "@/app/hooks/useStellarWallet";
 
 interface NavbarProps {
   activeTab: "swap" | "history";
@@ -12,7 +13,9 @@ export function Navbar({ activeTab, setActiveTab }: NavbarProps) {
   const { address, isConnected } = useAccount();
   const { connect, connectors } = useConnect();
   const { disconnect } = useDisconnect();
+  const stellarWallet = useStellarWallet();
   const [showWalletMenu, setShowWalletMenu] = useState(false);
+  const [showStellarMenu, setShowStellarMenu] = useState(false);
   const [mounted, setMounted] = useState(false);
 
   useEffect(() => {
@@ -146,7 +149,11 @@ export function Navbar({ activeTab, setActiveTab }: NavbarProps) {
           </button>
         </div>
 
-        {/* Right: Wallet Connect Button */}
+        {/* Right: Wallet Connect Buttons — EVM (wagmi) and Stellar (Stellar
+            Wallets Kit) are independent connections, both shown so the user
+            can see/manage each without needing Stellar selected as a route
+            first. */}
+        <div className="flex items-center gap-2">
         <div className="relative">
           {!mounted ? (
             <div className="h-9 w-32 animate-pulse rounded-xl bg-slate-800/60" />
@@ -225,6 +232,90 @@ export function Navbar({ activeTab, setActiveTab }: NavbarProps) {
               Connect Wallet
             </button>
           )}
+        </div>
+
+        {/* Stellar wallet — independent of the EVM connection above. Needed
+            whenever Stellar is the SOURCE chain (signs the trustline/swap/
+            approve/burn steps); harmless to leave connected otherwise. */}
+        <div className="relative">
+          {!mounted ? (
+            <div className="h-9 w-32 animate-pulse rounded-xl bg-slate-800/60" />
+          ) : stellarWallet.address ? (
+            <div className="relative">
+              <button
+                onClick={() => setShowStellarMenu(!showStellarMenu)}
+                className="flex items-center gap-2 rounded-xl border border-violet-700/60 bg-slate-900 px-3.5 py-1.5 text-xs font-medium text-slate-200 hover:border-violet-500 hover:bg-slate-800/80 transition-all shadow-sm"
+              >
+                <span className="h-2 w-2 rounded-full bg-violet-400 animate-pulse" />
+                <span className="font-mono">
+                  {stellarWallet.address.slice(0, 6)}…{stellarWallet.address.slice(-4)}
+                </span>
+                <svg
+                  width="12"
+                  height="12"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  className={`transition-transform ${showStellarMenu ? "rotate-180" : ""}`}
+                >
+                  <path d="m6 9 6 6 6-6" />
+                </svg>
+              </button>
+
+              {showStellarMenu && (
+                <div className="absolute right-0 mt-2 w-56 rounded-xl border border-slate-800 bg-slate-900 p-2 shadow-xl backdrop-blur-lg">
+                  <div className="px-3 py-2 border-b border-slate-800/80 mb-1">
+                    <p className="text-[10px] text-slate-500 uppercase tracking-wider font-mono">Stellar Wallet</p>
+                    <p className="text-xs font-mono text-slate-300 break-all">{stellarWallet.address}</p>
+                  </div>
+                  <button
+                    onClick={() => {
+                      stellarWallet.disconnect();
+                      setShowStellarMenu(false);
+                    }}
+                    className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-xs font-medium text-red-400 hover:bg-red-950/30 transition-colors"
+                  >
+                    <svg
+                      width="14"
+                      height="14"
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="2"
+                    >
+                      <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" />
+                      <polyline points="16 17 21 12 16 7" />
+                      <line x1="21" y1="12" x2="9" y2="12" />
+                    </svg>
+                    Disconnect Stellar Wallet
+                  </button>
+                </div>
+              )}
+            </div>
+          ) : (
+            <button
+              onClick={() => stellarWallet.connect()}
+              disabled={stellarWallet.connecting}
+              className="flex items-center gap-2 rounded-xl border border-violet-500/60 bg-violet-950/30 hover:bg-violet-900/40 text-violet-300 px-4 py-2 text-xs font-bold transition-all shadow-sm active:scale-95 disabled:opacity-50"
+            >
+              <svg
+                width="14"
+                height="14"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2.5"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              >
+                <circle cx="12" cy="12" r="9" />
+                <path d="M12 3a9 9 0 0 1 0 18M3 12h18" />
+              </svg>
+              {stellarWallet.connecting ? "Connecting…" : "Stellar"}
+            </button>
+          )}
+        </div>
         </div>
       </div>
     </header>
