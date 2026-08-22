@@ -59,9 +59,13 @@ interface ChainSelectorProps {
   exclude?: string;
   onChange: (key: string) => void;
   disabled?: boolean;
+  /** Restrict the dropdown to a subset of LEG_KEYS (e.g. the "From" selector
+   *  excludes Stellar, which is destination-only in this phase). Defaults
+   *  to every chain. */
+  keys?: string[];
 }
 
-export function ChainSelector({ value, exclude, onChange, disabled }: ChainSelectorProps) {
+export function ChainSelector({ value, exclude, onChange, disabled, keys = LEG_KEYS }: ChainSelectorProps) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
   const leg = LEGS[value];
@@ -92,7 +96,7 @@ export function ChainSelector({ value, exclude, onChange, disabled }: ChainSelec
 
       {open && (
         <div className="absolute left-0 top-full z-20 mt-2 w-52 rounded-xl border border-white/10 bg-[var(--card-hover)] p-1.5 shadow-2xl shadow-black/60">
-          {LEG_KEYS.map((k) => (
+          {keys.map((k) => (
             <button
               key={k}
               type="button"

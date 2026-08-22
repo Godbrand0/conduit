@@ -9,10 +9,12 @@ import {
   useWaitForTransactionReceipt,
   useWriteContract,
 } from "wagmi";
-import { BaseError, encodeFunctionData, padHex, parseEther, parseUnits } from "viem";
+import { BaseError, concatHex, encodeFunctionData, numberToHex, padHex, parseEther, parseUnits, stringToHex, toHex } from "viem";
 import { encodeHook, TOKEN_MESSENGER_ABI, USDC_ABI } from "@cctp-sdk/core";
+import { StrKey } from "@stellar/stellar-sdk";
 import {
   LEGS,
+  type Leg,
   POOL_SLOT0_ABI,
   PAIR_RESERVES_ABI,
   SWAP_AND_BURN_ABI,
@@ -20,14 +22,119 @@ import {
   SWAP_USDC_TO_NATIVE_ABI,
   SWAP_USDC_TO_NATIVE_V2_ABI,
   ZERO_BYTES32,
+  XLM_TO_WEI_SCALE,
   quoteEthToUsdc,
   quoteUsdcToEth,
   quoteEthToUsdcV2,
   quoteUsdcToEthV2,
+  quoteUsdcToXlm,
+  quoteXlmToUsdc,
 } from "@/lib/legs";
 import type { SwapRow } from "@/lib/db";
+import { useStellarWallet } from "./useStellarWallet";
 
 const NATIVE_TO_USDC_SCALE = 1_000_000_000_000n; // 1e12: 18-decimal native <-> 6-decimal µUSDC
+
+/** Real strkey validation (not a regex guess) — a well-formed Stellar
+ * Ed25519 public key ("G..." address), the only kind of recipient this
+ * phase accepts. */
+export function isValidStellarRecipient(value: string): boolean {
+  return StrKey.isValidEd25519PublicKey(value);
+}
+
+/**
+ * Shared hookData builder for any EVM destination — used both when the
+ * source is another EVM chain (SwapAndBurn) and when the source is Stellar
+ * (deposit_for_burn_with_hook), since Circle's hookData wire format is
+ * identical either way and this destination-side logic never changes.
+ * Never called when `dest.isStellar` (that has its own byte layout, built
+ * inline in `swap()` below).
+ */
+function buildEvmDestHook(dest: Leg, address: `0x${string}`) {
+  const mintRecipient = dest.nativeIsUsdc ? address : dest.executor!;
+  const mintRecipientBytes32 = padHex(mintRecipient, { size: 32 });
+  const destinationCaller = dest.nativeIsUsdc ? ZERO_BYTES32 : padHex(dest.executor!, { size: 32 });
+  const hookData = dest.nativeIsUsdc
+    ? ("0x00" as const)
+    : encodeHook({
+        target: dest.executor!,
+        calldata:
+          dest.dex === "v2"
+            ? encodeFunctionData({
+                abi: SWAP_USDC_TO_NATIVE_V2_ABI,
+                functionName: "swapUsdcToNative",
+                args: [0n, 1n, address],
+              })
+            : encodeFunctionData({
+                abi: SWAP_USDC_TO_NATIVE_ABI,
+                functionName: "swapUsdcToNative",
+                args: [0n, dest.poolFee!, 1n, address],
+              }),
+        forwardAmount: 0n,
+      });
+  return { mintRecipientBytes32, destinationCaller, hookData };
+}
+
+/** Round-trips one Stellar-source step through the server (build/simulate/
+ * prepare, since Soroban RPC doesn't belong in a client fetch — see
+ * /api/stellar-source/prepare), signs with the connected Stellar wallet, and
+ * submits + polls to completion. Throws on any failure. */
+async function stellarPrepareSignSubmit(
+  step: string,
+  publicKey: string,
+  args: Record<string, unknown>,
+  signTransaction: (xdr: string) => Promise<string>
+): Promise<{ hash: string; status: string }> {
+  const prepRes = await fetch("/api/stellar-source/prepare", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ step, publicKey, ...args }),
+  });
+  const prepData = await prepRes.json();
+  if (!prepRes.ok) throw new Error(prepData.error ?? `${step}: prepare failed`);
+
+  const signedXdr = await signTransaction(prepData.xdr);
+
+  const subRes = await fetch("/api/stellar-source/submit", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ signedXdr }),
+  });
+  const subData = await subRes.json();
+  if (!subRes.ok) throw new Error(subData.error ?? `${step}: submit failed`);
+  if (subData.status !== "SUCCESS") throw new Error(`${step}: ${subData.status}`);
+  return subData;
+}
+
+/** Live XLM balance (via Horizon) for the connected Stellar wallet, scaled
+ * to 18-decimal "wei-equivalent" so the rest of the UI's formatEther() calls
+ * work the same way they do for every EVM chain's native balance. */
+function useStellarXlmBalance(publicKey: string | null, horizonUrl: string | undefined): bigint | null {
+  const [balance, setBalance] = useState<bigint | null>(null);
+  useEffect(() => {
+    setBalance(null);
+    if (!publicKey || !horizonUrl) return;
+    let stale = false;
+    fetch(`${horizonUrl}/accounts/${publicKey}`)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((acc) => {
+        if (stale || !acc) return;
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const native = acc.balances?.find((b: any) => b.asset_type === "native");
+        if (!native) return;
+        const stroops = BigInt(Math.round(parseFloat(native.balance) * 1e7));
+        setBalance(stroops * XLM_TO_WEI_SCALE);
+      })
+      .catch(() => {
+        // Unfunded/nonexistent account (404) or a transient RPC error —
+        // leave balance null, same as any other chain's loading state.
+      });
+    return () => {
+      stale = true;
+    };
+  }, [publicKey, horizonUrl]);
+  return balance;
+}
 
 /** Circle fast-transfer fee (µUSDC) for a route, via our /api/fee proxy. */
 export function useFastFee(from: string, to: string): bigint | null {
@@ -51,7 +158,10 @@ export function useFastFee(from: string, to: string): bigint | null {
  */
 export function useUsdcEstimate(from: string, amount: string): bigint | null {
   const source = LEGS[from];
-  const publicClient = usePublicClient({ chainId: source.chain.id });
+  // `source.chain` is undefined only for the Stellar leg — usePublicClient
+  // tolerates an undefined chainId, and the Stellar branch below never
+  // touches the returned client.
+  const publicClient = usePublicClient({ chainId: source.chain?.id });
   const [estimate, setEstimate] = useState<bigint | null>(null);
 
   useEffect(() => {
@@ -67,6 +177,23 @@ export function useUsdcEstimate(from: string, amount: string): bigint | null {
     if (source.nativeIsUsdc) {
       setEstimate(wei / NATIVE_TO_USDC_SCALE);
       return;
+    }
+    if (source.isStellar) {
+      // amount is XLM; wei here is really an 18-decimal "wei-equivalent" of
+      // XLM (see XLM_TO_WEI_SCALE) — scale back down to real 7-decimal
+      // stroops before quoting against the pair's reserves.
+      const stroops = wei / XLM_TO_WEI_SCALE;
+      let stale = false;
+      fetch(`/api/stellar-quote?from=${from}`)
+        .then((r) => r.json())
+        .then((d) => {
+          if (stale || d.error) return;
+          setEstimate(quoteXlmToUsdc(stroops, BigInt(d.reserveUsdc), BigInt(d.reserveXlm)));
+        })
+        .catch(() => {});
+      return () => {
+        stale = true;
+      };
     }
     if (!publicClient) return;
     let stale = false;
@@ -139,7 +266,9 @@ export function useReceiveEstimate(
 ): Quote {
   const source = LEGS[from];
   const dest = LEGS[to];
-  const publicClient = usePublicClient({ chainId: dest.chain.id });
+  // dest.chain is undefined for the Stellar leg — usePublicClient tolerates
+  // an undefined chainId, and the Stellar branch below never touches it.
+  const publicClient = usePublicClient({ chainId: dest.chain?.id });
   const [quote, setQuote] = useState<Quote>(LOADING_QUOTE);
 
   useEffect(() => {
@@ -163,8 +292,25 @@ export function useReceiveEstimate(
       setQuote({ estimate: net * NATIVE_TO_USDC_SCALE, ...breakdown });
       return;
     }
-    if (!publicClient) return;
     let stale = false;
+    if (dest.isStellar) {
+      // No viem publicClient for Stellar — read the Soroswap pair's
+      // reserves via the /api/stellar-quote proxy (Soroban RPC doesn't fit
+      // a client-side effect directly), mirroring how /api/fee proxies
+      // Circle's fee endpoint.
+      fetch(`/api/stellar-quote?to=${to}`)
+        .then((r) => r.json())
+        .then((d) => {
+          if (stale || d.error) return;
+          const stroops = quoteUsdcToXlm(net, BigInt(d.reserveUsdc), BigInt(d.reserveXlm));
+          setQuote({ estimate: stroops * XLM_TO_WEI_SCALE, ...breakdown });
+        })
+        .catch(() => {});
+      return () => {
+        stale = true;
+      };
+    }
+    if (!publicClient) return;
     if (dest.dex === "v2") {
       publicClient
         .readContract({ address: dest.pool!, abi: PAIR_RESERVES_ABI, functionName: "getReserves" })
@@ -183,7 +329,7 @@ export function useReceiveEstimate(
     return () => {
       stale = true;
     };
-  }, [usdcEstimate, fastFee, source, dest, publicClient]);
+  }, [usdcEstimate, fastFee, source, dest, to, publicClient]);
 
   return quote;
 }
@@ -195,18 +341,22 @@ export type SwapStep = {
   link: string | null;
 };
 
-/** A swap being tracked — either just signed, or selected from history. */
-type Tracked = { hash: `0x${string}`; from: string; to: string };
+/** A swap being tracked — either just signed, or selected from history.
+ *  `hash` is a bare 64-hex Stellar tx hash when `from` is Stellar, otherwise
+ *  a standard 0x-prefixed EVM tx hash. */
+type Tracked = { hash: string; from: string; to: string };
 
 /**
  * The full swap flow: route/amount state, one-signature execution via
- * SwapAndBurn, and live status of the tracked transfer (client receipt +
- * relayer polling).
+ * SwapAndBurn (or, when the source is Stellar, a Stellar-wallet-signed
+ * multi-step sequence), and live status of the tracked transfer (client
+ * receipt + relayer polling).
  */
 export function useSwapFlow() {
   const { address, chainId, isConnected } = useAccount();
   const { switchChainAsync } = useSwitchChain();
   const { writeContractAsync, isPending: signing } = useWriteContract();
+  const stellarWallet = useStellarWallet();
 
   const [from, setFrom] = useState("base");
   const [to, setTo] = useState("arbitrum");
@@ -214,14 +364,25 @@ export function useSwapFlow() {
   const [tracked, setTracked] = useState<Tracked | null>(null);
   const [serverSwap, setServerSwap] = useState<SwapRow | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // Human-readable progress during the Stellar-source multi-signature
+  // sequence (e.g. "1 of 3: Swap XLM → USDC…") — null outside that flow.
+  const [stellarSourceStep, setStellarSourceStep] = useState<string | null>(null);
+
+  const [stellarRecipient, setStellarRecipient] = useState("");
 
   const source = LEGS[from];
   const dest = LEGS[to];
-  const sourcePublicClient = usePublicClient({ chainId: source.chain.id });
+  // `source.chain` is undefined only for the Stellar leg.
+  const sourcePublicClient = usePublicClient({ chainId: source.chain?.id });
   const maxFee = useFastFee(from, to);
   const usdcEstimate = useUsdcEstimate(from, amount);
   const quote = useReceiveEstimate(from, to, usdcEstimate, maxFee);
-  const { data: balance } = useBalance({ address, chainId: source.chain.id });
+  const { data: evmBalance } = useBalance({ address, chainId: source.chain?.id });
+  const stellarXlmBalance = useStellarXlmBalance(
+    source.isStellar ? stellarWallet.address : null,
+    source.horizonUrl
+  );
+  const balance = source.isStellar ? stellarXlmBalance : (evmBalance?.value ?? null);
 
   // The tracked swap's own route (may differ from the selectors, e.g. when
   // opened from history).
@@ -229,8 +390,13 @@ export function useSwapFlow() {
   const trackedDest = tracked ? LEGS[tracked.to] : dest;
 
   const { data: burnReceipt } = useWaitForTransactionReceipt({
-    hash: tracked?.hash,
-    chainId: trackedSource.chain.id,
+    // Stellar sources have no EVM receipt to wait for — `tracked` is only
+    // set for a Stellar-sourced swap once the burn itself already succeeded
+    // (see the Stellar branch of `swap()` below), so `steps` below treats
+    // `!!tracked` as "burn done" for that case instead.
+    hash: trackedSource.isStellar ? undefined : (tracked?.hash as `0x${string}` | undefined),
+    chainId: trackedSource.chain?.id,
+    query: { enabled: !trackedSource.isStellar && !!tracked },
   });
 
   // Poll the relayer status while a tracked swap is in flight.
@@ -257,15 +423,22 @@ export function useSwapFlow() {
   }, [tracked]);
 
   const steps: SwapStep[] = useMemo(() => {
-    const burnDone = !!burnReceipt;
+    // Stellar sources have no EVM receipt to wait on — `tracked` is only set
+    // once the whole Stellar-side signature sequence (up to 4 signatures)
+    // already succeeded, so its mere presence means the burn is done.
+    const burnDone = trackedSource.isStellar ? !!tracked : !!burnReceipt;
     const attested = serverSwap?.status === "RELAYING" || serverSwap?.status === "COMPLETE";
     const complete = serverSwap?.status === "COMPLETE";
     const burnLabel = trackedSource.nativeIsUsdc
       ? `Burn native USDC on ${trackedSource.label}`
-      : `Swap ${trackedSource.chain.nativeCurrency.symbol} → USDC + burn on ${trackedSource.label}`;
+      : trackedSource.isStellar
+        ? `Swap XLM → USDC + burn on ${trackedSource.label} (Stellar wallet)`
+        : `Swap ${trackedSource.chain!.nativeCurrency.symbol} → USDC + burn on ${trackedSource.label}`;
     const mintLabel = trackedDest.nativeIsUsdc
       ? `Mint native USDC on ${trackedDest.label}`
-      : `Mint + swap USDC → ${trackedDest.chain.nativeCurrency.symbol} on ${trackedDest.label}`;
+      : trackedDest.isStellar
+        ? `Mint + swap USDC → XLM on ${trackedDest.label} (Soroban)`
+        : `Mint + swap USDC → ${trackedDest.chain!.nativeCurrency.symbol} on ${trackedDest.label}`;
     return [
       {
         label: burnLabel,
@@ -291,24 +464,128 @@ export function useSwapFlow() {
   }, [tracked, burnReceipt, serverSwap, trackedSource, trackedDest]);
 
   const reverse = useCallback(() => {
+    // Stellar can now be either side (Phase 2), so a straight swap is
+    // always valid — the ChainSelector's `exclude` prop already prevents
+    // selecting the same chain on both sides.
     setFrom(to);
     setTo(from);
   }, [from, to]);
 
   /** Track an existing swap (e.g. selected from history). */
-  const track = useCallback((hash: `0x${string}`, swapFrom: string, swapTo: string) => {
+  const track = useCallback((hash: string, swapFrom: string, swapTo: string) => {
     setError(null);
     setServerSwap(null);
     setTracked({ hash, from: swapFrom, to: swapTo });
   }, []);
+
+  /**
+   * Stellar-as-source: up to four sequential Stellar Wallets Kit signatures
+   * (trustline if missing, swap XLM → USDC via Soroswap's router — verified
+   * live to work for a real EOA signer despite failing for a contract
+   * caller in Phase 1, see DEPLOYMENTS.md — approve TokenMessengerMinter,
+   * then deposit_for_burn_with_hook). The destination side is always a
+   * normal EVM chain (Stellar can never be picked as both), so it reuses
+   * the exact same hookData construction as every other EVM destination.
+   */
+  const swapFromStellar = useCallback(async () => {
+    if (!stellarWallet.address) throw new Error("Connect a Stellar wallet first");
+    if (!address) throw new Error("Connect an EVM wallet to receive on the destination chain");
+    const stroopsIn = parseEther(amount || "0") / XLM_TO_WEI_SCALE;
+    if (stroopsIn <= 0n) throw new Error("Enter an amount");
+
+    const { hookData, mintRecipientBytes32, destinationCaller } = buildEvmDestHook(dest, address);
+    const sign = stellarWallet.signTransaction;
+
+    // Trustline: a real Stellar ACCOUNT needs one for classic-asset-backed
+    // SAC tokens like USDC before it can hold a balance (contracts never
+    // need this — verified live, see DEPLOYMENTS.md). Skip it for a
+    // returning user who already has one, to save a signature.
+    setStellarSourceStep("Checking your Stellar account for a USDC trustline…");
+    const horizonAccount = await fetch(`${source.horizonUrl}/accounts/${stellarWallet.address}`)
+      .then((r) => (r.ok ? r.json() : null))
+      .catch(() => null);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const hasTrustline = horizonAccount?.balances?.some((b: any) => b.asset_code === "USDC");
+    const totalSteps = hasTrustline ? 3 : 4;
+    let stepNum = 1;
+    if (!hasTrustline) {
+      setStellarSourceStep(`${stepNum} of ${totalSteps}: Approve a USDC trustline in your Stellar wallet…`);
+      await stellarPrepareSignSubmit("trustline", stellarWallet.address, {}, sign);
+      stepNum++;
+    }
+
+    // Quote a real slippage floor (same 1% margin verified live against the
+    // router — see scripts/verify-soroswap-router.ts) rather than guessing.
+    setStellarSourceStep(`${stepNum} of ${totalSteps}: Swap XLM → USDC in your Stellar wallet…`);
+    const quoteRes = await fetch(`/api/stellar-quote?from=${from}`).then((r) => r.json());
+    if (quoteRes.error) throw new Error(`quote failed: ${quoteRes.error}`);
+    const estOut = quoteXlmToUsdc(stroopsIn, BigInt(quoteRes.reserveUsdc), BigInt(quoteRes.reserveXlm));
+    const minOut = (estOut * 990n) / 1000n;
+    await stellarPrepareSignSubmit(
+      "swap",
+      stellarWallet.address,
+      { amountIn: stroopsIn.toString(), amountOutMin: minOut.toString() },
+      sign
+    );
+    stepNum++;
+
+    // Read the real post-swap balance rather than trusting the pre-swap
+    // estimate — burns/approves exactly what's spendable.
+    const usdcAmount = await fetch(`/api/stellar-source/balance?publicKey=${stellarWallet.address}`)
+      .then((r) => r.json())
+      .then((d) => BigInt(d.balance ?? "0"));
+    if (usdcAmount <= 0n) throw new Error("Swap produced no USDC");
+
+    setStellarSourceStep(`${stepNum} of ${totalSteps}: Approve the burn contract to spend your USDC…`);
+    await stellarPrepareSignSubmit(
+      "approve",
+      stellarWallet.address,
+      { amount: usdcAmount.toString(), spender: source.stellarTokenMessengerMinter },
+      sign
+    );
+    stepNum++;
+
+    setStellarSourceStep(`${stepNum} of ${totalSteps}: Burn USDC on Stellar (final signature)…`);
+    const fee = maxFee ?? 100_000n; // fallback: 0.1 USDC
+    const { hash } = await stellarPrepareSignSubmit(
+      "burn",
+      stellarWallet.address,
+      {
+        amount: usdcAmount.toString(),
+        destinationDomain: dest.domain,
+        mintRecipientHex: mintRecipientBytes32,
+        destinationCallerHex: destinationCaller,
+        maxFee: fee.toString(),
+        hookDataHex: hookData,
+      },
+      sign
+    );
+    setStellarSourceStep(null);
+    return hash;
+  }, [address, amount, dest, from, maxFee, source, stellarWallet]);
 
   const swap = useCallback(async () => {
     setError(null);
     setTracked(null);
     setServerSwap(null);
     try {
-      if (chainId !== source.chain.id) {
-        await switchChainAsync({ chainId: source.chain.id });
+      if (dest.isStellar && !isValidStellarRecipient(stellarRecipient)) {
+        throw new Error("Enter a valid Stellar recipient address (G...)");
+      }
+
+      if (source.isStellar) {
+        const hash = await swapFromStellar();
+        setTracked({ hash, from, to });
+        await fetch("/api/swaps", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ burnTxHash: hash, from, to }),
+        });
+        return;
+      }
+
+      if (chainId !== source.chain!.id) {
+        await switchChainAsync({ chainId: source.chain!.id });
       }
       const fee = maxFee ?? 1_300_000n;
       // Wallets underestimate fees on Arbitrum Sepolia (maxFeePerGas below the
@@ -332,35 +609,52 @@ export function useSwapFlow() {
       // Shared hook target: mint straight to the user's own address with no
       // hook when the destination is Arc (nothing to swap into — hookData
       // must still be non-empty since TokenMessenger's WithHook variant
-      // rejects empty data, but it's never decoded there); otherwise a hook
-      // into the destination's swapUsdcToNative, using the V2-shaped ABI
-      // (no poolFee param) when the destination is the Uniswap-V2-style
+      // rejects empty data, but it's never decoded there); a raw
+      // Circle-format hookData (see below) when the destination is Stellar
+      // (no atomic hook execution there — CctpForwarder only mints and
+      // forwards, so the "hook" is Conduit's own trailing recipient field,
+      // re-parsed a second time by swap_and_deliver); otherwise a hook into
+      // the destination's swapUsdcToNative, using the V2-shaped ABI (no
+      // poolFee param) when the destination is the Uniswap-V2-style
       // Avalanche deployment.
-      const mintRecipient = dest.nativeIsUsdc ? address! : dest.executor!;
-      const mintRecipientBytes32 = padHex(mintRecipient, { size: 32 });
-      const destinationCaller = dest.nativeIsUsdc
-        ? ZERO_BYTES32
-        : padHex(dest.executor!, { size: 32 });
-      const hookData = dest.nativeIsUsdc
-        ? ("0x00" as const)
-        : encodeHook({
-            target: dest.executor!,
-            calldata:
-              dest.dex === "v2"
-                ? encodeFunctionData({
-                    abi: SWAP_USDC_TO_NATIVE_V2_ABI,
-                    functionName: "swapUsdcToNative",
-                    // amountIn=0: swap all minted USDC. minOut=1: testnet pools carry
-                    // arbitrary prices; production quoting sets a real slippage floor.
-                    args: [0n, 1n, address!],
-                  })
-                : encodeFunctionData({
-                    abi: SWAP_USDC_TO_NATIVE_ABI,
-                    functionName: "swapUsdcToNative",
-                    args: [0n, dest.poolFee!, 1n, address!],
-                  }),
-            forwardAmount: 0n,
-          });
+      let mintRecipientBytes32: `0x${string}`;
+      let destinationCaller: `0x${string}`;
+      let hookData: `0x${string}`;
+
+      if (dest.isStellar) {
+        // Both mintRecipient and destinationCaller must be CctpForwarder's
+        // OWN address, never swap_and_deliver's — verified on-chain that
+        // anything else reverts with InvalidMintRecipient (see
+        // DEPLOYMENTS.md #15 and scripts/stellar-e2e.ts). Where funds really
+        // end up is entirely CctpForwarder's own hookData-driven concern.
+        const forwarderBytes32 = toHex(StrKey.decodeContract(dest.stellarCctpForwarder!)) as `0x${string}`;
+        mintRecipientBytes32 = forwarderBytes32;
+        destinationCaller = forwarderBytes32;
+
+        // Byte layout (matches scripts/stellar-e2e.ts exactly): 24-byte
+        // reserved + 4-byte version (both zero) + 4-byte BE length +
+        // 56-byte ascii swap_and_deliver contract id (Circle's own
+        // mint_and_forward format) + Conduit's own trailing 4-byte BE
+        // length + ascii final Stellar recipient (the real delivery
+        // address, cryptographically bound inside the attested message so
+        // no one relaying it can redirect funds).
+        const circleRecipientAscii = stringToHex(dest.stellarSwapAndDeliver!);
+        const finalRecipientAscii = stringToHex(stellarRecipient);
+        hookData = concatHex([
+          numberToHex(0, { size: 24 }), // reserved
+          numberToHex(0, { size: 4 }), // version
+          numberToHex(dest.stellarSwapAndDeliver!.length, { size: 4 }),
+          circleRecipientAscii,
+          numberToHex(stellarRecipient.length, { size: 4 }),
+          finalRecipientAscii,
+        ]);
+      } else {
+        // amountIn=0 (swap all minted USDC) / minOut=1 (testnet pools carry
+        // arbitrary prices; production quoting sets a real slippage floor)
+        // are baked into buildEvmDestHook, shared with the Stellar-source
+        // path above.
+        ({ mintRecipientBytes32, destinationCaller, hookData } = buildEvmDestHook(dest, address!));
+      }
 
       let hash: `0x${string}`;
 
@@ -381,7 +675,7 @@ export function useSwapFlow() {
             abi: USDC_ABI,
             functionName: "approve",
             args: [source.tokenMessenger!, usdcAmount],
-            chainId: source.chain.id,
+            chainId: source.chain!.id,
           });
           await sourcePublicClient!.waitForTransactionReceipt({ hash: approveHash });
         }
@@ -400,7 +694,7 @@ export function useSwapFlow() {
             1000,
             hookData,
           ],
-          chainId: source.chain.id,
+          chainId: source.chain!.id,
         });
       } else if (source.dex === "v2") {
         // Avalanche as source: SwapAndBurnUniV2 — same shape as SwapAndBurn
@@ -411,7 +705,7 @@ export function useSwapFlow() {
           functionName: "swapAndBurnNative",
           args: [1n, dest.domain, mintRecipientBytes32, destinationCaller, fee, 1000, hookData],
           value: parseEther(amount || "0"),
-          chainId: source.chain.id,
+          chainId: source.chain!.id,
           ...gasOverride,
         });
       } else {
@@ -430,7 +724,7 @@ export function useSwapFlow() {
             hookData,
           ],
           value: parseEther(amount || "0"),
-          chainId: source.chain.id,
+          chainId: source.chain!.id,
           ...gasFees,
         });
       }
@@ -446,10 +740,25 @@ export function useSwapFlow() {
         e instanceof BaseError ? e.shortMessage : e instanceof Error ? e.message : "swap failed";
       setError(msg.slice(0, 300));
     }
-  }, [address, chainId, source, dest, from, to, amount, maxFee, sourcePublicClient, switchChainAsync, writeContractAsync]);
+  }, [
+    address,
+    chainId,
+    source,
+    dest,
+    from,
+    to,
+    amount,
+    maxFee,
+    sourcePublicClient,
+    switchChainAsync,
+    writeContractAsync,
+    stellarRecipient,
+    swapFromStellar,
+  ]);
 
   const busy =
     signing ||
+    !!stellarSourceStep ||
     (!!tracked && serverSwap?.status !== "COMPLETE" && serverSwap?.status !== "FAILED");
 
   return {
@@ -463,11 +772,13 @@ export function useSwapFlow() {
     reverse,
     source,
     dest,
+    stellarRecipient,
+    setStellarRecipient,
     // quote
     maxFee,
     usdcEstimate,
     quote,
-    balance: balance?.value ?? null,
+    balance,
     // execution + tracking
     swap,
     track,
@@ -480,5 +791,7 @@ export function useSwapFlow() {
     busy,
     error,
     isConnected,
+    stellarSourceStep,
+    stellarWallet,
   };
 }

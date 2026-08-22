@@ -379,5 +379,141 @@ Known limitation: `cargo test` currently fails to compile due to an upstream
 this contract's code — the release wasm build, what actually gets deployed,
 is clean and unaffected); see the comment in `stellar/swap_and_deliver/Cargo.toml`.
 Real correctness is proven by the live on-chain execution above, not a unit
-test. Frontend integration (Stellar as a selectable chain in the app) not
-yet built.
+test.
+
+### #16 — Stellar wired into the live frontend + relayer, destination-only (2026-08-22)
+
+Stellar is now a selectable **destination** chain in the app
+(`frontend/lib/legs.ts`), not just standalone scripts — Phase 1 of two.
+Stellar isn't EVM, so `Leg.chain` (a `viem` `Chain`) is now optional; a new
+`isStellar` flag switches the swap/quote/relay code onto a parallel path
+instead of `viem` contract calls throughout:
+
+- **UI**: since the Stellar side needs no wallet connection or signature at
+  all (trustless by design — see #15), the destination becomes a plain
+  Stellar G-address text field, validated with `StrKey.isValidEd25519PublicKey`
+  (a real strkey check, not a regex guess) before the swap button unlocks.
+  Stellar is excluded from the "From" selector entirely, since Stellar-as-
+  source isn't built yet (Phase 2) — several wagmi hooks dereference
+  `source.chain.id` unconditionally on render, so hiding it there (rather
+  than only guarding inside the swap callback) avoids a page crash if it
+  were selectable.
+- **Quoting**: a new `/api/stellar-quote` route proxies a Soroban RPC
+  `simulateTransaction` call reading the Soroswap pair's `get_reserves`,
+  mirroring the existing `/api/fee` proxy pattern — browser JS can't cleanly
+  do this via `viem`.
+- **hookData**: built client-side to the exact byte layout proven in #15
+  (reserved + version + length-prefixed `swap_and_deliver` contract id +
+  Conduit's trailing length-prefixed final recipient), using `viem`'s
+  `concatHex`/`numberToHex`/`stringToHex` (browser-safe; the original proof
+  script used Node's `Buffer`). `mintRecipient`/`destinationCaller` are both
+  `CctpForwarder`'s own address, matching the same on-chain-verified
+  requirement from #15.
+- **Relayer**: `relayer.ts` gained a `relayToStellar()` branch — polls Iris,
+  then calls `mint_and_forward` and `swap_and_deliver` via Soroban RPC
+  (prepare/sign/send/poll), mirroring `scripts/stellar-e2e.ts`'s `invoke()`
+  helper. No `SwapRow` schema change was needed — the recipient lives inside
+  the attested hookData, not a stored column, same as every other chain.
+
+**Live proof — through the actual running app, not the standalone script:**
+a fresh `scripts/frontend-e2e-stellar.ts` burns on Arbitrum Sepolia using the
+frontend's exact hookData construction, then POSTs to a live `next dev`
+server's `/api/swaps` — the same request the browser sends — so the app's
+own `relayToStellar()` does the real work.
+
+| Step | Tx |
+|---|---|
+| Burn (Arbitrum Sepolia, existing unmodified `SwapAndBurn`) | [`0x56a93117…a6b6a34`](https://sepolia.arbiscan.io/tx/0x56a93117e938203400aee1cea78a7b78474c797c6310f622ad06e9617a6b6a34) |
+| Relay (Stellar, via the app's `relayer.ts`) | [`3d2660c3…4ff784c`](https://stellar.expert/explorer/testnet/tx/3d2660c38118caa9f5307400e5f042abe69e5ef8b5377366fdeaa10c54ff784c) |
+
+Status transitioned `RELAYING → COMPLETE` in ~12 seconds via `/api/swaps/{hash}`;
+**13.6604827 XLM** delivered to a freshly generated, previously-unfunded
+Stellar account, confirming the whole flow — burn, attestation poll,
+`mint_and_forward`, `swap_and_deliver` — works through the production code
+path, not just a hand-rolled script.
+
+Known limitation (resolved by #17 below): Stellar-as-**source** was not yet
+built at the time of this entry.
+
+### #17 — Stellar wired as a SOURCE chain, full bidirectional support (2026-08-22)
+
+Phase 2: a user can now hold XLM (or USDC) on Stellar, connect a Stellar
+wallet, and swap out to any EVM chain's native token — Conduit is fully
+bidirectional on Stellar. Two real on-chain findings shaped the design,
+neither assumed in advance:
+
+- **Soroswap's testnet router works fine for a real user-signed
+  transaction.** #15 found the router fails when *Conduit's own relayer
+  contract* (`swap_and_deliver`) calls it — a contract identity can't
+  satisfy Soroban's auth requirements for a nested cross-contract transfer
+  made on its behalf. That finding does NOT extend to a normal wallet
+  signing directly: when the transaction's source account is a real Ed25519
+  keypair, `rpc.Server.prepareTransaction`'s simulation-derived auth entries
+  cover the router's whole nested call tree in one signature — confirmed
+  live via `scripts/verify-soroswap-router.ts` before committing to the
+  design. So Phase 2 calls Soroswap's router
+  (`CCJUD55AG6W5HAI5LRVNKAE5WDP5XGZBUDS5WNTIVDU7O264UZZE7BRD`) directly for
+  the XLM→USDC leg — one signature, not the pair-level bypass #15 needed.
+- **A Stellar account needs a classic trustline for USDC before it can hold
+  a balance.** Stellar's USDC SAC wraps a classic asset
+  (`USDC:GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5`) — only
+  *accounts* need a trustline, not *contracts*, which is why #15/#16 (where
+  USDC is only ever held by the `swap_and_deliver` contract) never hit this.
+  A `changeTrust` step was added, skipped automatically for a wallet that
+  already has one.
+- **Circle's `deposit_for_burn_with_hook` needs a standard `approve` first**
+  (internally `transfer_from`, per Circle's `deposit.rs`) — same shape as an
+  EVM ERC20 approve+transferFrom.
+- **Stellar's 7-decimal local USDC amount is normalized to CCTP's canonical
+  6-decimal amount automatically inside Circle's own contract** — confirmed
+  on the live proof burn (210,762,437 local units → 21,076,243 canonical
+  µUSDC, exactly ÷10). This means the existing, unmodified `ReceiveAndSwap.sol`
+  and `relayer.ts`'s standard `relayAndExecute` path needed **zero changes**
+  to consume a Stellar-sourced burn — Stellar-as-source plugs directly into
+  the same destination machinery every EVM chain already uses.
+
+Because there's no atomic multi-step call on Stellar, a Stellar-source swap
+is 3 sequential wallet signatures (trustline if needed, router swap, approve,
+burn) instead of every other chain's single signature — the UI surfaces this
+as an explicit step-by-step progress indicator rather than leaving the user
+wondering if something's stuck.
+
+**Live proof — Stellar (XLM) → Arbitrum Sepolia (native ETH), through the
+actual running app:**
+
+| Step | Tx |
+|---|---|
+| USDC trustline (Stellar) | one-time per wallet, skipped on repeat swaps |
+| Swap XLM → USDC (Soroswap router) | [`4277b350…2795900`](https://stellar.expert/explorer/testnet/tx/4277b35043b74deea3b11a9cbca4aac8230314aba3c1e1346a070ce4e2795900) |
+| Approve `TokenMessengerMinter` | [`46b5720c…37afa57`](https://stellar.expert/explorer/testnet/tx/46b5720cd441af4b0c6b701456bcfd68f6cd056dab67cc443615d927537afa57) |
+| Burn (`deposit_for_burn_with_hook`) | [`460308f0…6cfa1be9`](https://stellar.expert/explorer/testnet/tx/460308f084aa1d303d94f131e8b9bf1d27ec4d918014f29e99ed20c96cfa1be9) |
+| Relay (Arbitrum Sepolia, app's existing `relayer.ts`, unmodified) | [`0x6b7482…f30c37c31`](https://sepolia.arbiscan.io/tx/0x6b74822badeb1ab8eca6e6b2bd7a28a839df4f94cffa6c16d302cb9f30c37c31) |
+
+Status transitioned `AWAITING_ATTESTATION → RELAYING → COMPLETE` in ~10
+seconds via `/api/swaps/{hash}`; **0.01835548386867192 ETH** delivered to a
+freshly generated, previously-unfunded Arbitrum Sepolia account. Reproduced
+independently via `scripts/frontend-e2e-stellar-source.ts` against a live
+`next dev` server (not just the implementing agent's own run), confirming
+the result.
+
+Files: `frontend/lib/legs.ts` (`stellarTokenMessengerMinter`,
+`quoteXlmToUsdc`), `frontend/app/hooks/useStellarWallet.ts` (new — Stellar
+Wallets Kit v2.5 wrapper; its API is a static class,
+`StellarWalletsKit.init/.authModal/.signTransaction`, not instance-based —
+verified against the installed package's own `.d.ts`, not assumed),
+`frontend/app/hooks/useSwap.ts` (`swapFromStellar` branch),
+`frontend/app/api/stellar-source/{prepare,submit,balance}/route.ts` (new —
+server-side XDR build/simulate, the browser signs via the Kit),
+`frontend/app/api/stellar-quote/route.ts` (now bidirectional),
+`frontend/app/api/swaps/route.ts` (accepts bare-hex Stellar tx hashes
+alongside `0x`-prefixed EVM ones), `frontend/app/components/SwapCard.tsx`
+(Stellar wallet connect UI, multi-step signing progress banner, Stellar now
+selectable as "From").
+
+Known limitation: the Stellar Wallets Kit's actual browser UI
+(`authModal`, real Freighter popup) was implemented per its verified API
+but not click-through tested in a real browser — this was proven with
+`@stellar/stellar-sdk` `Keypair` signing directly (identical on-chain
+operations, no sandboxed browser available). A real click-through test in
+an actual browser with Freighter installed is the one remaining thing to
+verify before calling Stellar fully production-ready in the UI.

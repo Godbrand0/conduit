@@ -1,10 +1,12 @@
 "use client";
 
 import { useState } from "react";
-import { ArrowDownUp, ChevronDown, Zap, AlertTriangle } from "lucide-react";
+import { ArrowDownUp, ChevronDown, Zap, AlertTriangle, Wallet } from "lucide-react";
 import { formatEther, formatUnits } from "viem";
-import { LEGS } from "@/lib/legs";
+import { LEGS, LEG_KEYS } from "@/lib/legs";
 import type { Quote } from "@/app/hooks/useSwap";
+import { isValidStellarRecipient } from "@/app/hooks/useSwap";
+import type { useStellarWallet } from "@/app/hooks/useStellarWallet";
 import { ChainSelector } from "./ChainSelector";
 
 interface SwapCardProps {
@@ -24,6 +26,14 @@ interface SwapCardProps {
   busy: boolean;
   isConnected: boolean;
   error: string | null;
+  stellarRecipient: string;
+  setStellarRecipient: (v: string) => void;
+  /** Progress text during the Stellar-source multi-signature sequence
+   *  (e.g. "2 of 3: Swap XLM → USDC…"), null outside that flow. */
+  stellarSourceStep: string | null;
+  /** Stellar wallet connection (Stellar Wallets Kit), separate from wagmi's
+   *  EVM connection — only relevant/shown when Stellar is the source. */
+  stellarWallet: ReturnType<typeof useStellarWallet>;
 }
 
 const fmtEth = (wei: bigint, digits = 6) =>
@@ -35,7 +45,8 @@ const fmtUsdc = (micro: bigint, digits = 4) =>
 const unitFor = (chainKey: string) => {
   const leg = LEGS[chainKey];
   if (!leg) return "ETH";
-  return leg.nativeIsUsdc ? "USDC" : leg.chain.nativeCurrency.symbol;
+  if (leg.isStellar) return "XLM";
+  return leg.nativeIsUsdc ? "USDC" : leg.chain!.nativeCurrency.symbol;
 };
 
 export function SwapCard({
@@ -55,10 +66,22 @@ export function SwapCard({
   busy,
   isConnected,
   error,
+  stellarRecipient,
+  setStellarRecipient,
+  stellarSourceStep,
+  stellarWallet,
 }: SwapCardProps) {
   const [showDetails, setShowDetails] = useState(false);
   const source = LEGS[from];
   const dest = LEGS[to];
+  const needsStellarRecipient = !!dest.isStellar;
+  const stellarRecipientValid = !needsStellarRecipient || isValidStellarRecipient(stellarRecipient);
+  const needsStellarWallet = !!source.isStellar;
+  // Stellar-as-source needs BOTH wallets: the Stellar one to sign the burn,
+  // and an EVM one since the destination is always an EVM chain whose
+  // connected address is the implicit recipient (same as every other
+  // route — there's no separate "EVM recipient" field anywhere in this app).
+  const readyToSwap = needsStellarWallet ? isConnected && !!stellarWallet.address : isConnected;
 
   // Only computable when the source amount already IS USDC (Arc) — for
   // every other chain the input is a native-token amount, so "how much more
@@ -112,6 +135,45 @@ export function SwapCard({
           </div>
         </div>
 
+        {/* Stellar wallet connect — only shown when Stellar is the source,
+            since that's the only case that needs a Stellar signature (as a
+            destination, Stellar is fully trustless — see the recipient
+            field below instead). Independent of wagmi's EVM connection,
+            which is still required too (the destination is always EVM). */}
+        {needsStellarWallet && (
+          <div className="mt-2.5 flex items-center justify-between rounded-xl border border-white/5 bg-[var(--card-inset)] px-4 py-2.5">
+            <div className="flex items-center gap-2 text-sm text-slate-400">
+              <Wallet className="h-3.5 w-3.5" />
+              <span>Stellar wallet</span>
+            </div>
+            {stellarWallet.address ? (
+              <div className="flex items-center gap-2">
+                <span className="h-2 w-2 rounded-full bg-emerald-400" />
+                <span className="font-mono text-xs text-slate-300">
+                  {stellarWallet.address.slice(0, 6)}…{stellarWallet.address.slice(-4)}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => stellarWallet.disconnect()}
+                  disabled={busy}
+                  className="text-xs text-slate-500 transition-colors hover:text-rose-400 disabled:opacity-40"
+                >
+                  Disconnect
+                </button>
+              </div>
+            ) : (
+              <button
+                type="button"
+                onClick={() => stellarWallet.connect()}
+                disabled={busy || stellarWallet.connecting}
+                className="rounded-lg bg-cyan-400 px-3 py-1.5 text-xs font-semibold text-black transition-all hover:bg-cyan-300 disabled:opacity-40"
+              >
+                {stellarWallet.connecting ? "Connecting…" : "Connect"}
+              </button>
+            )}
+          </div>
+        )}
+
         {/* Direction */}
         <div className="relative z-10 my-1 flex h-12 items-center justify-center">
           <button
@@ -155,6 +217,32 @@ export function SwapCard({
             </p>
           )}
         </div>
+
+        {/* Stellar recipient — trustless destination, no wallet connection
+            needed on that side, just a delivery address the user types in. */}
+        {needsStellarRecipient && (
+          <div className="mt-3 space-y-1.5">
+            <label htmlFor="stellar-recipient" className="text-sm text-slate-400">
+              Stellar recipient address
+            </label>
+            <input
+              id="stellar-recipient"
+              value={stellarRecipient}
+              onChange={(e) => setStellarRecipient(e.target.value.trim())}
+              disabled={busy}
+              placeholder="G..."
+              spellCheck={false}
+              className={`w-full rounded-xl border bg-[var(--card-inset)] px-4 py-2.5 font-mono text-sm text-white outline-none placeholder:text-slate-600 disabled:opacity-40 ${
+                stellarRecipient && !stellarRecipientValid
+                  ? "border-rose-500/40"
+                  : "border-white/5 focus:border-cyan-500/40"
+              }`}
+            />
+            {stellarRecipient && !stellarRecipientValid && (
+              <p className="text-xs text-rose-400">Not a valid Stellar address (must start with G).</p>
+            )}
+          </div>
+        )}
 
         {/* Amount-too-small warning */}
         {quote.tooSmall && (
@@ -221,20 +309,32 @@ export function SwapCard({
               </div>
               <div className="flex justify-between">
                 <dt className="text-slate-400">Signatures</dt>
-                <dd className="text-slate-200">1</dd>
+                <dd className="text-slate-200">{needsStellarWallet ? "up to 4 (Stellar wallet)" : 1}</dd>
               </div>
               <div className="flex justify-between">
                 <dt className="text-slate-400">ETA</dt>
-                <dd className="text-cyan-400">~20 seconds</dd>
+                <dd className="text-cyan-400">{needsStellarWallet ? "~40 seconds" : "~20 seconds"}</dd>
               </div>
             </dl>
           )}
         </div>
 
+        {/* Stellar-source progress — several sequential signatures, unlike
+            every other route's single one, so make each step explicit
+            rather than leaving the user staring at a generic "Swapping…". */}
+        {stellarSourceStep && (
+          <div className="mt-3 flex items-start gap-2 rounded-xl border border-cyan-500/20 bg-cyan-950/20 px-3 py-2.5 text-xs text-cyan-300">
+            <Wallet className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+            <span>{stellarSourceStep}</span>
+          </div>
+        )}
+
         {/* CTA */}
         <button
           onClick={onSwap}
-          disabled={!isConnected || busy || !amount || quote.tooSmall}
+          disabled={
+            !readyToSwap || busy || !amount || quote.tooSmall || (needsStellarRecipient && !stellarRecipientValid)
+          }
           className="mt-5 w-full rounded-xl bg-cyan-400 py-3.5 font-semibold text-black transition-all hover:bg-cyan-300 active:scale-[0.98] disabled:opacity-40 disabled:hover:bg-cyan-400"
         >
           {signing
@@ -243,9 +343,13 @@ export function SwapCard({
               ? "Swapping…"
               : quote.tooSmall
                 ? "Amount too small"
-                : isConnected
-                  ? "Swap"
-                  : "Connect wallet to swap"}
+                : needsStellarRecipient && !stellarRecipientValid
+                  ? "Enter a valid Stellar address"
+                  : needsStellarWallet && !stellarWallet.address
+                    ? "Connect your Stellar wallet"
+                    : readyToSwap
+                      ? "Swap"
+                      : "Connect wallet to swap"}
         </button>
 
         {error && (

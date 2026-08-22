@@ -9,7 +9,9 @@
   },
   "dependencies": {
     "@cctp-sdk/core": "^0.2.0",
+    "@creit.tech/stellar-wallets-kit": "^2.5.0",
     "@rainbow-me/rainbowkit": "^2.2.11",
+    "@stellar/stellar-sdk": "^17.0.0",
     "@tanstack/react-query": "^5.101.4",
     "lucide-react": "^1.27.0",
     "next": "16.2.12",

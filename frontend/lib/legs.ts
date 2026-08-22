@@ -20,10 +20,15 @@ export type Leg = {
   short: string;
   /** Brand color for the chain icon */
   color: string;
-  chain: Chain;
+  /** A viem Chain object — every chain has one EXCEPT Stellar (non-EVM; see
+   *  `isStellar`). Any code path that reads `.chain` must branch on
+   *  `isStellar` first — Stellar can now be either source or destination. */
+  chain?: Chain;
   domain: number;
   explorer: string;
-  /** Server-side RPC (public); the wallet uses its own for writes */
+  /** Server-side RPC (public); the wallet uses its own for writes. For the
+   *  Stellar leg this is the Soroban RPC endpoint (not an EVM JSON-RPC URL —
+   *  never passed to a viem transport). */
   rpc: string;
   /** True when this chain's native gas token IS USDC (only Arc, so far).
    *  No swap on either side; the swap/pool fields below are omitted. */
@@ -35,8 +40,15 @@ export type Leg = {
    *  `pool` means the LP pair address rather than a V3 pool. Omitted/"v3"
    *  for every other standard chain. */
   dex?: "v2";
+  /** True only for the Stellar leg — non-EVM (Soroban). No `chain`/
+   *  `executor`/`pool`; uses the `stellar*` fields below instead. As a
+   *  DESTINATION, the final recipient is NOT a fixed EOA (unlike every other
+   *  chain) — the user supplies a Stellar G-address per swap, embedded in
+   *  hookData. As a SOURCE, the user signs with a Stellar wallet (Stellar
+   *  Wallets Kit) instead of an EVM wallet. */
+  isStellar?: boolean;
 
-  // ── Standard-chain fields (omitted when nativeIsUsdc) ──────────────────
+  // ── Standard-chain fields (omitted when nativeIsUsdc or isStellar) ─────
   /** ReceiveAndSwap v2 hook executor (destination side) */
   executor?: `0x${string}`;
   /** SwapAndBurn fee-enabled (source side) */
@@ -60,6 +72,25 @@ export type Leg = {
   messageTransmitter?: `0x${string}`;
   /** The ERC20-view precompile CCTP burns/mints through on Arc. */
   usdc?: `0x${string}`;
+
+  // ── Stellar-only fields (see stellar/swap_and_deliver, DEPLOYMENTS.md #15) ──
+  /** Circle's CctpForwarder contract — mint_and_forward. `mintRecipient` and
+   *  `destinationCaller` on the EVM burn must BOTH be this address. */
+  stellarCctpForwarder?: string;
+  /** Conduit's own swap_and_deliver Soroban contract. Its 56-char contract
+   *  id (as ascii) is embedded as CctpForwarder's own "circle recipient"
+   *  field inside hookData. */
+  stellarSwapAndDeliver?: string;
+  /** Stellar SAC address for USDC. */
+  stellarUsdc?: string;
+  /** Soroswap USDC/XLM pair (Uniswap-V2-shaped), used for spot quoting. */
+  stellarPair?: string;
+  /** Horizon (classic Stellar) endpoint, used to read account balances. */
+  horizonUrl?: string;
+  /** Circle's TokenMessengerMinter on Stellar — Stellar-as-SOURCE burns go
+   *  through `deposit_for_burn_with_hook` on this contract, called directly
+   *  by the user's own Stellar wallet (see DEPLOYMENTS.md #17). */
+  stellarTokenMessengerMinter?: string;
 };
 
 export const LEGS: Record<string, Leg> = {
@@ -152,6 +183,25 @@ export const LEGS: Record<string, Leg> = {
     token0IsUsdc: true,
     explorer: "https://testnet.snowtrace.io",
     rpc: "https://api.avax-test.network/ext/bc/C/rpc",
+  },
+  stellar: {
+    key: "stellar",
+    label: "Stellar Testnet",
+    short: "Stellar",
+    color: "#7D00FF",
+    domain: 27,
+    isStellar: true,
+    stellarCctpForwarder: "CA66Q2WFBND6V4UEB7RD4SAXSVIWMD6RA4X3U32ELVFGXV5PJK4T4VSZ",
+    stellarSwapAndDeliver: "CBHP22SRJB4JXSDAQ6LKAZV72JLBL2GV7MCRVLYKO6GI7GKZ3XP5XPY6",
+    stellarUsdc: "CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMXQDAMA",
+    stellarPair: "CCBX3NZTCQLQFSPG7HBOKL4P2RVPOPVFHDNRTOSCCJWBTPL2GHEH7RQS",
+    stellarTokenMessengerMinter: "CDNG7HXAPBWICI2E3AUBP3YZWZELJLYSB6F5CC7WLDTLTHVM74SLRTHP",
+    // stellar.expert's tx path shape (`/tx/{hash}`) matches every other
+    // leg's `${explorer}/tx/${hash}` pattern, so no special-casing needed
+    // for the destination-step link.
+    explorer: "https://stellar.expert/explorer/testnet",
+    rpc: "https://soroban-testnet.stellar.org",
+    horizonUrl: "https://horizon-testnet.stellar.org",
   },
   arc: {
     key: "arc",
@@ -267,6 +317,32 @@ export function quoteUsdcToEthV2(
   const [reserveUsdc, reserveEth] = token0IsUsdc ? [reserve0, reserve1] : [reserve1, reserve0];
   const usdcInWithFee = usdcMicro * 997n;
   return (reserveEth * usdcInWithFee) / (reserveUsdc * 1000n + usdcInWithFee);
+}
+
+/** Stellar's native asset uses 7 decimals (stroops), not EVM's 18 — the rest
+ * of the app's `Quote.estimate` is an 18-decimal ("wei-equivalent") value so
+ * `formatEther()` works universally, so XLM amounts get scaled up by 1e11. */
+export const XLM_TO_WEI_SCALE = 100_000_000_000n; // 1e11: 7-decimal stroops -> 18-decimal
+
+/** Spot-quote USDC (µ, 6-decimal) → XLM (stroops, 7-decimal) from the
+ * Soroswap USDC/XLM pair's reserves — same constant-product, 0.3%-fee
+ * formula swap_and_deliver's own on-chain code uses (see
+ * stellar/swap_and_deliver/contracts/swap_and_deliver/src/lib.rs). Both
+ * reserves come back from Soroban RPC already in their native decimals
+ * (verified: the contract does no decimal conversion between the CCTP
+ * message's 6-decimal amount and the raw reserve values), so no additional
+ * scaling is needed on the input side. */
+export function quoteUsdcToXlm(usdcMicro: bigint, reserveUsdc: bigint, reserveXlmStroops: bigint): bigint {
+  const amountInWithFee = usdcMicro * 997n;
+  return (amountInWithFee * reserveXlmStroops) / (reserveUsdc * 1000n + amountInWithFee);
+}
+
+/** Spot-quote XLM (stroops, 7-decimal) → USDC (µ, 6-decimal) — the inverse,
+ * used when Stellar is the SOURCE (user holds XLM, needs USDC to burn). Same
+ * constant-product, 0.3%-fee formula as `quoteUsdcToXlm`, reserves swapped. */
+export function quoteXlmToUsdc(xlmStroops: bigint, reserveUsdc: bigint, reserveXlmStroops: bigint): bigint {
+  const amountInWithFee = xlmStroops * 997n;
+  return (amountInWithFee * reserveUsdc) / (reserveXlmStroops * 1000n + amountInWithFee);
 }
 
 /** SwapAndBurnUniV2's ABI — same shape as SWAP_AND_BURN_ABI but no poolFee

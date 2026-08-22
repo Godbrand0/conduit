@@ -35,6 +35,10 @@ export default function Home() {
               busy={flow.busy}
               isConnected={flow.isConnected}
               error={flow.error}
+              stellarRecipient={flow.stellarRecipient}
+              setStellarRecipient={flow.setStellarRecipient}
+              stellarSourceStep={flow.stellarSourceStep}
+              stellarWallet={flow.stellarWallet}
             />
 
             {flow.tracked && (
@@ -43,7 +47,11 @@ export default function Home() {
                 serverSwap={flow.serverSwap}
                 destLabel={flow.trackedDest.label}
                 destUnit={
-                  flow.trackedDest.nativeIsUsdc ? "USDC" : flow.trackedDest.chain.nativeCurrency.symbol
+                  flow.trackedDest.nativeIsUsdc
+                    ? "USDC"
+                    : flow.trackedDest.isStellar
+                      ? "XLM"
+                      : flow.trackedDest.chain!.nativeCurrency.symbol
                 }
               />
             )}
@@ -65,7 +73,7 @@ export default function Home() {
         ) : (
           <HistoryView
             onSelectSwap={(hash, from, to) => {
-              flow.track(hash as `0x${string}`, from, to);
+              flow.track(hash, from, to);
               setActiveTab("swap");
             }}
           />
