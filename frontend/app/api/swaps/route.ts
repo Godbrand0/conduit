@@ -12,7 +12,7 @@ import { LEGS } from "@/lib/legs";
 export const maxDuration = 60;
 
 export async function POST(req: NextRequest) {
-  const { burnTxHash, from, to } = await req.json();
+  const { burnTxHash, from, to, assetMode } = await req.json();
   // Stellar tx hashes are a bare 64-hex-char string (no 0x prefix, and not
   // the keccak of an RLP-encoded EVM tx) — Soroban RPC/Horizon never add
   // one. Every other chain is EVM, whose viem-produced tx hash IS 0x-
@@ -23,8 +23,9 @@ export async function POST(req: NextRequest) {
   if (!validHash || !LEGS[from] || !LEGS[to] || from === to) {
     return NextResponse.json({ error: "invalid request" }, { status: 400 });
   }
+  const mode = assetMode === "usdc" ? "usdc" : "swap";
 
-  await insertSwap(burnTxHash, from, to);
+  await insertSwap(burnTxHash, from, to, mode);
   // The GET route's stale-sweep is the safety net if this run gets interrupted
   // anyway (deploys, cold-start limits); errors are persisted by relaySwap.
   after(() => relaySwap(burnTxHash, from, to).catch(() => {}));

@@ -18,9 +18,13 @@ export async function createPostgresStore() {
     "relayTxHash" TEXT,
     error TEXT,
     "usdcAmount" BIGINT,
+    "assetMode" TEXT NOT NULL DEFAULT 'swap',
     "createdAt" BIGINT NOT NULL,
     "updatedAt" BIGINT NOT NULL
   )`);
+
+  // Migration for rows created before raw-USDC mode.
+  await pool.query(`ALTER TABLE swaps ADD COLUMN IF NOT EXISTS "assetMode" TEXT NOT NULL DEFAULT 'swap'`);
 
   function rowOut(r: Record<string, unknown>): SwapRow {
     return {
@@ -31,18 +35,24 @@ export async function createPostgresStore() {
       relayTxHash: (r.relayTxHash as string) ?? null,
       error: (r.error as string) ?? null,
       usdcAmount: r.usdcAmount !== null ? Number(r.usdcAmount) : null,
+      assetMode: (r.assetMode as SwapRow["assetMode"]) ?? "swap",
       createdAt: Number(r.createdAt),
       updatedAt: Number(r.updatedAt),
     };
   }
 
-  async function insertSwap(burnTxHash: string, fromChain: string, toChain: string) {
+  async function insertSwap(
+    burnTxHash: string,
+    fromChain: string,
+    toChain: string,
+    assetMode: "swap" | "usdc" = "swap"
+  ) {
     const now = Date.now();
     await pool.query(
-      `INSERT INTO swaps ("burnTxHash", "fromChain", "toChain", status, "createdAt", "updatedAt")
-       VALUES ($1, $2, $3, 'RECEIVED', $4, $4)
+      `INSERT INTO swaps ("burnTxHash", "fromChain", "toChain", status, "assetMode", "createdAt", "updatedAt")
+       VALUES ($1, $2, $3, 'RECEIVED', $4, $5, $5)
        ON CONFLICT ("burnTxHash") DO NOTHING`,
-      [burnTxHash, fromChain, toChain, now]
+      [burnTxHash, fromChain, toChain, assetMode, now]
     );
   }
 

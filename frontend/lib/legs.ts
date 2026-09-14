@@ -108,6 +108,9 @@ export const LEGS: Record<string, Leg> = {
     token0IsUsdc: true,
     explorer: "https://sepolia.basescan.org",
     rpc: "https://base-sepolia-rpc.publicnode.com",
+    tokenMessenger: "0x8FE6B999Dc680CcFDD5Bf7EB0974218be2542DAA",
+    messageTransmitter: "0xE737e5cEBEEBa77EFE34D4aa090756590b1CE275",
+    usdc: "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
   },
   arbitrum: {
     key: "arbitrum",
@@ -123,6 +126,9 @@ export const LEGS: Record<string, Leg> = {
     token0IsUsdc: true,
     explorer: "https://sepolia.arbiscan.io",
     rpc: "https://sepolia-rollup.arbitrum.io/rpc",
+    tokenMessenger: "0x8FE6B999Dc680CcFDD5Bf7EB0974218be2542DAA",
+    messageTransmitter: "0xE737e5cEBEEBa77EFE34D4aa090756590b1CE275",
+    usdc: "0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d",
   },
   ethereum: {
     key: "ethereum",
@@ -138,6 +144,9 @@ export const LEGS: Record<string, Leg> = {
     token0IsUsdc: true,
     explorer: "https://sepolia.etherscan.io",
     rpc: "https://ethereum-sepolia-rpc.publicnode.com",
+    tokenMessenger: "0x8FE6B999Dc680CcFDD5Bf7EB0974218be2542DAA",
+    messageTransmitter: "0xE737e5cEBEEBa77EFE34D4aa090756590b1CE275",
+    usdc: "0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238",
   },
   optimism: {
     key: "optimism",
@@ -153,6 +162,9 @@ export const LEGS: Record<string, Leg> = {
     token0IsUsdc: false, // WETH (0x4200…) sorts below USDC (0x5fd8…) on OP Sepolia
     explorer: "https://sepolia-optimism.etherscan.io",
     rpc: "https://sepolia.optimism.io",
+    tokenMessenger: "0x8FE6B999Dc680CcFDD5Bf7EB0974218be2542DAA",
+    messageTransmitter: "0xE737e5cEBEEBa77EFE34D4aa090756590b1CE275",
+    usdc: "0x5fd84259d66Cd46123540766Be93DFE6D43130D7",
   },
   unichain: {
     key: "unichain",
@@ -168,6 +180,9 @@ export const LEGS: Record<string, Leg> = {
     token0IsUsdc: true,
     explorer: "https://sepolia.uniscan.xyz",
     rpc: "https://sepolia.unichain.org",
+    tokenMessenger: "0x8FE6B999Dc680CcFDD5Bf7EB0974218be2542DAA",
+    messageTransmitter: "0xE737e5cEBEEBa77EFE34D4aa090756590b1CE275",
+    usdc: "0x31d0220469e10c4E71834a79b1f276d740d3768F",
   },
   avalanche: {
     key: "avalanche",
@@ -183,6 +198,9 @@ export const LEGS: Record<string, Leg> = {
     token0IsUsdc: true,
     explorer: "https://testnet.snowtrace.io",
     rpc: "https://api.avax-test.network/ext/bc/C/rpc",
+    tokenMessenger: "0x8FE6B999Dc680CcFDD5Bf7EB0974218be2542DAA",
+    messageTransmitter: "0xE737e5cEBEEBa77EFE34D4aa090756590b1CE275",
+    usdc: "0x5425890298aed601595a70AB815c96711a31Bc65",
   },
   stellar: {
     key: "stellar",

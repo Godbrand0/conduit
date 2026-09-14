@@ -17,7 +17,7 @@ export default function Home() {
 
       <main className="mx-auto flex w-full flex-col items-center px-4 py-10">
         {activeTab === "swap" ? (
-          <div className="w-full max-w-md">
+          <div key="swap" className="w-full max-w-md animate-fade-slide-in">
             <SwapCard
               from={flow.from}
               to={flow.to}
@@ -30,6 +30,12 @@ export default function Home() {
               usdcEstimate={flow.usdcEstimate}
               quote={flow.quote}
               balance={flow.balance}
+              insufficientFunds={flow.insufficientFunds}
+              assetMode={flow.assetMode}
+              setAssetMode={flow.setAssetMode}
+              assetModeAllowed={flow.assetModeAllowed}
+              rawUsdcSource={flow.rawUsdcSource}
+              rawUsdcDest={flow.rawUsdcDest}
               onSwap={flow.swap}
               signing={flow.signing}
               busy={flow.busy}
@@ -47,7 +53,7 @@ export default function Home() {
                 serverSwap={flow.serverSwap}
                 destLabel={flow.trackedDest.label}
                 destUnit={
-                  flow.trackedDest.nativeIsUsdc
+                  flow.trackedDest.nativeIsUsdc || flow.serverSwap?.assetMode === "usdc"
                     ? "USDC"
                     : flow.trackedDest.isStellar
                       ? "XLM"
@@ -71,12 +77,14 @@ export default function Home() {
             </p>
           </div>
         ) : (
-          <HistoryView
-            onSelectSwap={(hash, from, to) => {
-              flow.track(hash, from, to);
-              setActiveTab("swap");
-            }}
-          />
+          <div key="history" className="w-full animate-fade-slide-in">
+            <HistoryView
+              onSelectSwap={(hash, from, to) => {
+                flow.track(hash, from, to);
+                setActiveTab("swap");
+              }}
+            />
+          </div>
         )}
       </main>
     </div>

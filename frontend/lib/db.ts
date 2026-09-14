@@ -14,6 +14,11 @@ export type SwapRow = {
   error: string | null;
   /** USDC burned, in µUSDC — decoded from the attested CCTP message */
   usdcAmount: number | null;
+  /** "usdc" = raw CCTP transfer (no swap either end, same path Arc always
+   *  uses); "swap" = native<->USDC via SwapAndBurn/ReceiveAndSwap. Read by
+   *  the relayer to pick receiveMessage vs relayAndExecute on legs where
+   *  it isn't a static per-leg fact (see lib/relayer.ts). */
+  assetMode: "swap" | "usdc";
   createdAt: number;
   updatedAt: number;
 };
@@ -30,7 +35,12 @@ export type UpdatableSwapFields = Partial<
 >;
 
 interface SwapStore {
-  insertSwap(burnTxHash: string, fromChain: string, toChain: string): Promise<void>;
+  insertSwap(
+    burnTxHash: string,
+    fromChain: string,
+    toChain: string,
+    assetMode?: "swap" | "usdc"
+  ): Promise<void>;
   updateSwap(burnTxHash: string, fields: UpdatableSwapFields): Promise<void>;
   getSwap(burnTxHash: string): Promise<SwapRow | undefined>;
   getAllSwaps(limit?: number): Promise<SwapRow[]>;

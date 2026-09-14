@@ -53,3 +53,46 @@ body {
 .animate-subtle-pulse {
   animation: subtle-pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
 }
+
+/* Fade + slight rise — tab switches, quote updates, dropdown menus */
+@keyframes fade-slide-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.animate-fade-slide-in {
+  animation: fade-slide-in 220ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.animate-fade-slide-in-fast {
+  animation: fade-slide-in 150ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+/* Scale + fade pop — a status step flipping from pending to done */
+@keyframes pop-in {
+  from { opacity: 0; transform: scale(0.85); }
+  to { opacity: 1; transform: scale(1); }
+}
+
+.animate-pop-in {
+  animation: pop-in 200ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+/* Collapsible details panel — grid-rows trick animates height without a
+   fixed max-height guess, and needs no JS measurement. */
+.details-collapse {
+  display: grid;
+  grid-template-rows: 0fr;
+  opacity: 0;
+  transition: grid-template-rows 200ms cubic-bezier(0.4, 0, 0.2, 1), opacity 180ms ease-out;
+}
+
+.details-collapse.details-collapse-open {
+  grid-template-rows: 1fr;
+  opacity: 1;
+}
+
+.details-collapse > div {
+  overflow: hidden;
+  min-height: 0;
+}

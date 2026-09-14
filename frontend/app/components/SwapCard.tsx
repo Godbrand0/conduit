@@ -21,6 +21,15 @@ interface SwapCardProps {
   usdcEstimate: bigint | null;
   quote: Quote;
   balance: bigint | null;
+  insufficientFunds: boolean;
+  /** "usdc" = raw CCTP transfer, no swap either end. */
+  assetMode: "swap" | "usdc";
+  setAssetMode: (v: "swap" | "usdc") => void;
+  /** False for any route touching Stellar or Arc — those legs have their
+   *  own fixed behavior and don't offer the toggle. */
+  assetModeAllowed: boolean;
+  rawUsdcSource: boolean;
+  rawUsdcDest: boolean;
   onSwap: () => void;
   signing: boolean;
   busy: boolean;
@@ -42,11 +51,11 @@ const fmtEth = (wei: bigint, digits = 6) =>
 const fmtUsdc = (micro: bigint, digits = 4) =>
   Number(formatUnits(micro, 6)).toLocaleString(undefined, { maximumFractionDigits: digits });
 
-const unitFor = (chainKey: string) => {
+const unitFor = (chainKey: string, raw = false) => {
   const leg = LEGS[chainKey];
   if (!leg) return "ETH";
   if (leg.isStellar) return "XLM";
-  return leg.nativeIsUsdc ? "USDC" : leg.chain!.nativeCurrency.symbol;
+  return leg.nativeIsUsdc || raw ? "USDC" : leg.chain!.nativeCurrency.symbol;
 };
 
 export function SwapCard({
@@ -61,6 +70,12 @@ export function SwapCard({
   usdcEstimate,
   quote,
   balance,
+  insufficientFunds,
+  assetMode,
+  setAssetMode,
+  assetModeAllowed,
+  rawUsdcSource,
+  rawUsdcDest,
   onSwap,
   signing,
   busy,
@@ -72,6 +87,7 @@ export function SwapCard({
   stellarWallet,
 }: SwapCardProps) {
   const [showDetails, setShowDetails] = useState(false);
+  const [spinCount, setSpinCount] = useState(0);
   const source = LEGS[from];
   const dest = LEGS[to];
   const needsStellarRecipient = !!dest.isStellar;
@@ -98,6 +114,35 @@ export function SwapCard({
         <span className="rounded-full bg-amber-400/10 px-2.5 py-1 text-xs text-amber-400/90">
           Testnet
         </span>
+        {assetModeAllowed && (
+          <div className="flex items-center rounded-full border border-white/10 bg-[var(--card-inset)] p-0.5 text-xs">
+            <button
+              type="button"
+              onClick={() => setAssetMode("swap")}
+              disabled={busy}
+              className={`rounded-full px-2.5 py-1 transition-colors ${
+                assetMode === "swap"
+                  ? "bg-cyan-400 text-black"
+                  : "text-slate-400 hover:text-slate-200"
+              }`}
+            >
+              Swap to native
+            </button>
+            <button
+              type="button"
+              onClick={() => setAssetMode("usdc")}
+              disabled={busy}
+              title="Send raw USDC on both ends — no swap, no Conduit fee"
+              className={`rounded-full px-2.5 py-1 transition-colors ${
+                assetMode === "usdc"
+                  ? "bg-cyan-400 text-black"
+                  : "text-slate-400 hover:text-slate-200"
+              }`}
+            >
+              Raw USDC
+            </button>
+          </div>
+        )}
       </div>
 
       <div className="rounded-2xl border border-white/5 bg-[var(--card)] p-5 shadow-2xl shadow-black/40">
@@ -111,7 +156,7 @@ export function SwapCard({
               className="text-xs text-slate-500 transition-colors hover:text-cyan-400"
               title="Use ~95% of balance (reserves gas)"
             >
-              {balance !== null ? `Balance: ${fmtEth(balance, 4)} ${unitFor(from)}` : " "}
+              {balance !== null ? `Balance: ${fmtEth(balance, 4)} ${unitFor(from, rawUsdcSource)}` : " "}
             </button>
           </div>
           <div className="flex gap-3">
@@ -125,8 +170,8 @@ export function SwapCard({
                 className="w-full bg-transparent text-2xl font-semibold tracking-tight text-white outline-none placeholder:text-slate-600 [font-variant-numeric:tabular-nums]"
               />
               <div className="mt-0.5 truncate text-xs text-slate-500">
-                {source.nativeIsUsdc
-                  ? "native USDC — no swap needed"
+                {rawUsdcSource
+                  ? "raw USDC — no swap needed"
                   : usdcEstimate !== null
                     ? `≈ ${fmtUsdc(usdcEstimate, 2)} USDC before fees`
                     : " "}
@@ -178,13 +223,19 @@ export function SwapCard({
         <div className="relative z-10 my-1 flex h-12 items-center justify-center">
           <button
             type="button"
-            onClick={reverse}
+            onClick={() => {
+              setSpinCount((n) => n + 1);
+              reverse();
+            }}
             disabled={busy}
             title="Reverse route"
             aria-label="Reverse route"
             className="rounded-xl border border-white/10 bg-[var(--card-hover)] p-2.5 transition-all hover:scale-105 hover:border-cyan-500/40 disabled:opacity-40"
           >
-            <ArrowDownUp className="h-4 w-4 text-slate-300" />
+            <ArrowDownUp
+              className="h-4 w-4 text-slate-300 transition-transform duration-300 ease-out"
+              style={{ transform: `rotate(${spinCount * 180}deg)` }}
+            />
           </button>
         </div>
 
@@ -197,17 +248,25 @@ export function SwapCard({
           <div className="flex gap-3">
             <ChainSelector value={to} exclude={from} onChange={setTo} disabled={busy} />
             <div className="min-w-0 flex-1 rounded-xl border border-white/5 bg-[var(--card-inset)] px-4 py-2">
-              <div className="break-all text-2xl font-semibold tracking-tight text-white [font-variant-numeric:tabular-nums]">
-                {quote.tooSmall
+              {(() => {
+                const receiveText = quote.tooSmall
                   ? "Too small"
                   : quote.estimate !== null
                     ? `~${fmtEth(quote.estimate)}`
                     : usdcEstimate !== null
                       ? "Fetching quote…"
-                      : "…"}
-              </div>
+                      : "…";
+                return (
+                  <div
+                    key={receiveText}
+                    className="animate-fade-slide-in-fast break-all text-2xl font-semibold tracking-tight text-white [font-variant-numeric:tabular-nums]"
+                  >
+                    {receiveText}
+                  </div>
+                );
+              })()}
               <div className="mt-0.5 truncate text-xs text-slate-500">
-                {quote.tooSmall ? "increase the amount" : `${unitFor(to)} on ${dest.label}`}
+                {quote.tooSmall ? "increase the amount" : `${unitFor(to, rawUsdcDest)} on ${dest.label}`}
               </div>
             </div>
           </div>
@@ -244,6 +303,17 @@ export function SwapCard({
           </div>
         )}
 
+        {/* Insufficient balance warning */}
+        {insufficientFunds && (
+          <div className="mt-3 flex items-start gap-2 rounded-xl border border-rose-500/20 bg-rose-950/30 px-3 py-2.5 text-xs text-rose-300">
+            <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+            <span>
+              Insufficient balance — you have {balance !== null ? fmtEth(balance, 4) : "0"}{" "}
+              {unitFor(from, rawUsdcSource)}.
+            </span>
+          </div>
+        )}
+
         {/* Amount-too-small warning */}
         {quote.tooSmall && (
           <div className="mt-3 flex items-start gap-2 rounded-xl border border-amber-500/20 bg-amber-950/30 px-3 py-2.5 text-xs text-amber-300">
@@ -270,14 +340,15 @@ export function SwapCard({
           >
             <div className="flex items-center gap-2">
               <Zap className="h-3.5 w-3.5 text-cyan-400" />
-              <span>Details · ~20s · 0.05% fee</span>
+              <span>Details · ~20s · {rawUsdcSource ? "0% fee" : "0.05% fee"}</span>
             </div>
             <ChevronDown
               className={`h-4 w-4 transition-transform ${showDetails ? "rotate-180" : ""}`}
             />
           </button>
 
-          {showDetails && (
+          <div className={`details-collapse ${showDetails ? "details-collapse-open" : ""}`}>
+            <div>
             <dl className="mt-3 space-y-2.5 text-sm">
               <div className="flex justify-between">
                 <dt className="text-slate-400">Amount before fees</dt>
@@ -286,7 +357,7 @@ export function SwapCard({
                 </dd>
               </div>
               <div className="flex justify-between">
-                <dt className="text-slate-400">Conduit fee (0.05%)</dt>
+                <dt className="text-slate-400">Conduit fee {rawUsdcSource ? "(raw USDC)" : "(0.05%)"}</dt>
                 <dd className="text-slate-200">
                   {quote.conduitFeeUsdc !== null ? `− ${fmtUsdc(quote.conduitFeeUsdc)} USDC` : "…"}
                 </dd>
@@ -316,7 +387,8 @@ export function SwapCard({
                 <dd className="text-cyan-400">{needsStellarWallet ? "~40 seconds" : "~20 seconds"}</dd>
               </div>
             </dl>
-          )}
+            </div>
+          </div>
         </div>
 
         {/* Stellar-source progress — several sequential signatures, unlike
@@ -333,7 +405,12 @@ export function SwapCard({
         <button
           onClick={onSwap}
           disabled={
-            !readyToSwap || busy || !amount || quote.tooSmall || (needsStellarRecipient && !stellarRecipientValid)
+            !readyToSwap ||
+            busy ||
+            !amount ||
+            quote.tooSmall ||
+            insufficientFunds ||
+            (needsStellarRecipient && !stellarRecipientValid)
           }
           className="mt-5 w-full rounded-xl bg-cyan-400 py-3.5 font-semibold text-black transition-all hover:bg-cyan-300 active:scale-[0.98] disabled:opacity-40 disabled:hover:bg-cyan-400"
         >
@@ -341,15 +418,17 @@ export function SwapCard({
             ? "Confirm in wallet…"
             : busy
               ? "Swapping…"
-              : quote.tooSmall
-                ? "Amount too small"
-                : needsStellarRecipient && !stellarRecipientValid
-                  ? "Enter a valid Stellar address"
-                  : needsStellarWallet && !stellarWallet.address
-                    ? "Connect your Stellar wallet"
-                    : readyToSwap
-                      ? "Swap"
-                      : "Connect wallet to swap"}
+              : insufficientFunds
+                ? "Insufficient balance"
+                : quote.tooSmall
+                  ? "Amount too small"
+                  : needsStellarRecipient && !stellarRecipientValid
+                    ? "Enter a valid Stellar address"
+                    : needsStellarWallet && !stellarWallet.address
+                      ? "Connect your Stellar wallet"
+                      : readyToSwap
+                        ? "Swap"
+                        : "Connect wallet to swap"}
         </button>
 
         {error && (

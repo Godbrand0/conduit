@@ -15,6 +15,7 @@ export function createSqliteStore() {
     status TEXT NOT NULL,
     relayTxHash TEXT,
     error TEXT,
+    assetMode TEXT NOT NULL DEFAULT 'swap',
     createdAt INTEGER NOT NULL,
     updatedAt INTEGER NOT NULL
   )`);
@@ -26,11 +27,23 @@ export function createSqliteStore() {
     // column already exists
   }
 
-  async function insertSwap(burnTxHash: string, fromChain: string, toChain: string) {
+  // Migration for rows created before raw-USDC mode.
+  try {
+    db.exec(`ALTER TABLE swaps ADD COLUMN assetMode TEXT NOT NULL DEFAULT 'swap'`);
+  } catch {
+    // column already exists
+  }
+
+  async function insertSwap(
+    burnTxHash: string,
+    fromChain: string,
+    toChain: string,
+    assetMode: "swap" | "usdc" = "swap"
+  ) {
     db.prepare(
-      `INSERT OR IGNORE INTO swaps (burnTxHash, fromChain, toChain, status, createdAt, updatedAt)
-       VALUES (?, ?, ?, 'RECEIVED', ?, ?)`
-    ).run(burnTxHash, fromChain, toChain, Date.now(), Date.now());
+      `INSERT OR IGNORE INTO swaps (burnTxHash, fromChain, toChain, status, assetMode, createdAt, updatedAt)
+       VALUES (?, ?, ?, 'RECEIVED', ?, ?, ?)`
+    ).run(burnTxHash, fromChain, toChain, assetMode, Date.now(), Date.now());
   }
 
   async function updateSwap(burnTxHash: string, fields: UpdatableSwapFields) {

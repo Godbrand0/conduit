@@ -18,11 +18,12 @@ export function StatusTracker({ steps, serverSwap, destLabel, destUnit }: Status
       {steps.map((s) => (
         <div key={s.label} className="flex items-center gap-3 text-sm">
           <span
+            key={s.done ? "done" : s.active ? "active" : "pending"}
             className={
               s.done
-                ? "text-emerald-400"
+                ? "animate-pop-in text-emerald-400"
                 : s.active
-                  ? "animate-pulse text-cyan-400"
+                  ? "animate-subtle-pulse text-cyan-400"
                   : "text-slate-600"
             }
           >

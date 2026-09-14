@@ -122,6 +122,25 @@ export function Navbar({ activeTab, setActiveTab }: NavbarProps) {
               </svg>
               Stats
             </a>
+            <a
+              href="/docs"
+              className="flex items-center gap-2 rounded-md px-3.5 py-1.5 text-xs font-semibold text-slate-400 transition-all hover:bg-slate-800/40 hover:text-slate-200"
+            >
+              <svg
+                width="14"
+                height="14"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              >
+                <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20" />
+                <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z" />
+              </svg>
+              Docs
+            </a>
           </nav>
         </div>
 
@@ -181,7 +200,7 @@ export function Navbar({ activeTab, setActiveTab }: NavbarProps) {
               </button>
 
               {showWalletMenu && (
-                <div className="absolute right-0 mt-2 w-48 rounded-xl border border-slate-800 bg-slate-900 p-2 shadow-xl backdrop-blur-lg">
+                <div className="absolute right-0 mt-2 w-48 rounded-xl border border-slate-800 bg-slate-900 p-2 shadow-xl backdrop-blur-lg animate-fade-slide-in-fast">
                   <div className="px-3 py-2 border-b border-slate-800/80 mb-1">
                     <p className="text-[10px] text-slate-500 uppercase tracking-wider font-mono">Connected Wallet</p>
                     <p className="text-xs font-mono text-slate-300 break-all">{address}</p>
@@ -264,7 +283,7 @@ export function Navbar({ activeTab, setActiveTab }: NavbarProps) {
               </button>
 
               {showStellarMenu && (
-                <div className="absolute right-0 mt-2 w-56 rounded-xl border border-slate-800 bg-slate-900 p-2 shadow-xl backdrop-blur-lg">
+                <div className="absolute right-0 mt-2 w-56 rounded-xl border border-slate-800 bg-slate-900 p-2 shadow-xl backdrop-blur-lg animate-fade-slide-in-fast">
                   <div className="px-3 py-2 border-b border-slate-800/80 mb-1">
                     <p className="text-[10px] text-slate-500 uppercase tracking-wider font-mono">Stellar Wallet</p>
                     <p className="text-xs font-mono text-slate-300 break-all">{stellarWallet.address}</p>

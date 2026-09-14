@@ -5,6 +5,7 @@ import {
   useAccount,
   useBalance,
   usePublicClient,
+  useReadContract,
   useSwitchChain,
   useWaitForTransactionReceipt,
   useWriteContract,
@@ -50,11 +51,12 @@ export function isValidStellarRecipient(value: string): boolean {
  * Never called when `dest.isStellar` (that has its own byte layout, built
  * inline in `swap()` below).
  */
-function buildEvmDestHook(dest: Leg, address: `0x${string}`) {
-  const mintRecipient = dest.nativeIsUsdc ? address : dest.executor!;
+function buildEvmDestHook(dest: Leg, address: `0x${string}`, raw: boolean) {
+  const rawDest = dest.nativeIsUsdc || raw;
+  const mintRecipient = rawDest ? address : dest.executor!;
   const mintRecipientBytes32 = padHex(mintRecipient, { size: 32 });
-  const destinationCaller = dest.nativeIsUsdc ? ZERO_BYTES32 : padHex(dest.executor!, { size: 32 });
-  const hookData = dest.nativeIsUsdc
+  const destinationCaller = rawDest ? ZERO_BYTES32 : padHex(dest.executor!, { size: 32 });
+  const hookData = rawDest
     ? ("0x00" as const)
     : encodeHook({
         target: dest.executor!,
@@ -156,7 +158,7 @@ export function useFastFee(from: string, to: string): bigint | null {
  * the quote comes from a Uniswap-V2-style pair's reserves instead of a V3
  * pool's sqrtPriceX96.
  */
-export function useUsdcEstimate(from: string, amount: string): bigint | null {
+export function useUsdcEstimate(from: string, amount: string, raw: boolean): bigint | null {
   const source = LEGS[from];
   // `source.chain` is undefined only for the Stellar leg — usePublicClient
   // tolerates an undefined chainId, and the Stellar branch below never
@@ -174,7 +176,7 @@ export function useUsdcEstimate(from: string, amount: string): bigint | null {
     }
     if (wei === 0n) return;
 
-    if (source.nativeIsUsdc) {
+    if (source.nativeIsUsdc || raw) {
       setEstimate(wei / NATIVE_TO_USDC_SCALE);
       return;
     }
@@ -215,7 +217,7 @@ export function useUsdcEstimate(from: string, amount: string): bigint | null {
     return () => {
       stale = true;
     };
-  }, [amount, source, publicClient]);
+  }, [amount, source, publicClient, raw]);
 
   return estimate;
 }
@@ -262,7 +264,9 @@ export function useReceiveEstimate(
   from: string,
   to: string,
   usdcEstimate: bigint | null,
-  fastFee: bigint | null
+  fastFee: bigint | null,
+  rawSource: boolean,
+  rawDest: boolean
 ): Quote {
   const source = LEGS[from];
   const dest = LEGS[to];
@@ -274,7 +278,7 @@ export function useReceiveEstimate(
   useEffect(() => {
     setQuote(LOADING_QUOTE);
     if (usdcEstimate === null || fastFee === null) return;
-    const conduitFee = source.nativeIsUsdc ? 0n : (usdcEstimate * 5n) / 10_000n;
+    const conduitFee = source.nativeIsUsdc || rawSource ? 0n : (usdcEstimate * 5n) / 10_000n;
     const net = usdcEstimate - conduitFee - fastFee;
     if (net <= 0n) {
       setQuote({
@@ -288,7 +292,7 @@ export function useReceiveEstimate(
     }
     const breakdown = { conduitFeeUsdc: conduitFee, circleFeeUsdc: fastFee, netUsdc: net, tooSmall: false };
 
-    if (dest.nativeIsUsdc) {
+    if (dest.nativeIsUsdc || rawDest) {
       setQuote({ estimate: net * NATIVE_TO_USDC_SCALE, ...breakdown });
       return;
     }
@@ -329,7 +333,7 @@ export function useReceiveEstimate(
     return () => {
       stale = true;
     };
-  }, [usdcEstimate, fastFee, source, dest, to, publicClient]);
+  }, [usdcEstimate, fastFee, source, dest, to, publicClient, rawSource, rawDest]);
 
   return quote;
 }
@@ -361,6 +365,12 @@ export function useSwapFlow() {
   const [from, setFrom] = useState("base");
   const [to, setTo] = useState("arbitrum");
   const [amount, setAmount] = useState("0.004");
+  // "usdc" = raw CCTP transfer, no swap on either end (same underlying path
+  // Arc already always uses). Only meaningful when both legs support it —
+  // see `assetModeAllowed` below, which silently overrides back to "swap"
+  // for Stellar/Arc legs rather than requiring every setter call site to
+  // remember to reset it.
+  const [assetMode, setAssetMode] = useState<"swap" | "usdc">("swap");
   const [tracked, setTracked] = useState<Tracked | null>(null);
   const [serverSwap, setServerSwap] = useState<SwapRow | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -372,17 +382,58 @@ export function useSwapFlow() {
 
   const source = LEGS[from];
   const dest = LEGS[to];
+  // Raw-USDC mode never applies to Stellar (always goes through
+  // swap_and_deliver) or Arc (already permanently raw) — force back to
+  // "swap" semantics for those routes regardless of the toggle state.
+  const assetModeAllowed = !source.isStellar && !dest.isStellar && !source.nativeIsUsdc && !dest.nativeIsUsdc;
+  const rawUsdcSource = source.nativeIsUsdc || (assetModeAllowed && assetMode === "usdc");
+  const rawUsdcDest = dest.nativeIsUsdc || (assetModeAllowed && assetMode === "usdc");
   // `source.chain` is undefined only for the Stellar leg.
   const sourcePublicClient = usePublicClient({ chainId: source.chain?.id });
   const maxFee = useFastFee(from, to);
-  const usdcEstimate = useUsdcEstimate(from, amount);
-  const quote = useReceiveEstimate(from, to, usdcEstimate, maxFee);
+  const usdcEstimate = useUsdcEstimate(from, amount, rawUsdcSource);
+  const quote = useReceiveEstimate(from, to, usdcEstimate, maxFee, rawUsdcSource, rawUsdcDest);
   const { data: evmBalance } = useBalance({ address, chainId: source.chain?.id });
+  // Raw-USDC mode (any leg but Arc, where "native" already means USDC) sends
+  // a separate 6-decimal ERC20, not the chain's native gas token — read that
+  // token's balance instead, or "Balance" would show the user's ETH/AVAX/etc.
+  // balance while the amount field actually means USDC. wagmi v3's useBalance
+  // dropped the `token` param it had in v1/v2, so this is a plain
+  // balanceOf() read instead.
+  const rawModeNonArc = rawUsdcSource && !source.nativeIsUsdc;
+  const { data: usdcBalance } = useReadContract({
+    address: source.usdc,
+    abi: USDC_ABI,
+    functionName: "balanceOf",
+    args: address ? [address] : undefined,
+    chainId: source.chain?.id,
+    query: { enabled: rawModeNonArc && !!address && !!source.usdc },
+  });
   const stellarXlmBalance = useStellarXlmBalance(
     source.isStellar ? stellarWallet.address : null,
     source.horizonUrl
   );
-  const balance = source.isStellar ? stellarXlmBalance : (evmBalance?.value ?? null);
+  const balance = source.isStellar
+    ? stellarXlmBalance
+    : rawModeNonArc
+      ? // Scale the ERC20's raw 6-decimal value up to the app's pseudo-18-
+        // decimal convention (formatEther/parseEther throughout, divided
+        // back down by NATIVE_TO_USDC_SCALE wherever a real µUSDC amount is
+        // needed) — same scale Arc's already-18-decimal native balance is
+        // implicitly in without needing this multiply.
+        (usdcBalance ?? null) !== null
+        ? (usdcBalance as bigint) * NATIVE_TO_USDC_SCALE
+        : null
+      : (evmBalance?.value ?? null);
+
+  const insufficientFunds = useMemo(() => {
+    if (balance === null || !amount) return false;
+    try {
+      return parseEther(amount) > balance;
+    } catch {
+      return false;
+    }
+  }, [balance, amount]);
 
   // The tracked swap's own route (may differ from the selectors, e.g. when
   // opened from history).
@@ -429,12 +480,18 @@ export function useSwapFlow() {
     const burnDone = trackedSource.isStellar ? !!tracked : !!burnReceipt;
     const attested = serverSwap?.status === "RELAYING" || serverSwap?.status === "COMPLETE";
     const complete = serverSwap?.status === "COMPLETE";
-    const burnLabel = trackedSource.nativeIsUsdc
+    // The persisted mode is the source of truth once the server row has
+    // loaded; right after submitting (before the first poll tick), fall
+    // back to the live toggle state — valid only while `tracked` still
+    // matches the currently-selected route (not a swap opened from history).
+    const isCurrentRoute = tracked?.from === from && tracked?.to === to;
+    const rawMode = serverSwap?.assetMode === "usdc" || (!serverSwap && isCurrentRoute && rawUsdcDest);
+    const burnLabel = trackedSource.nativeIsUsdc || rawMode
       ? `Burn native USDC on ${trackedSource.label}`
       : trackedSource.isStellar
         ? `Swap XLM → USDC + burn on ${trackedSource.label} (Stellar wallet)`
         : `Swap ${trackedSource.chain!.nativeCurrency.symbol} → USDC + burn on ${trackedSource.label}`;
-    const mintLabel = trackedDest.nativeIsUsdc
+    const mintLabel = trackedDest.nativeIsUsdc || rawMode
       ? `Mint native USDC on ${trackedDest.label}`
       : trackedDest.isStellar
         ? `Mint + swap USDC → XLM on ${trackedDest.label} (Soroban)`
@@ -461,7 +518,7 @@ export function useSwapFlow() {
           : null,
       },
     ];
-  }, [tracked, burnReceipt, serverSwap, trackedSource, trackedDest]);
+  }, [tracked, burnReceipt, serverSwap, trackedSource, trackedDest, from, to, rawUsdcDest]);
 
   const reverse = useCallback(() => {
     // Stellar can now be either side (Phase 2), so a straight swap is
@@ -493,7 +550,9 @@ export function useSwapFlow() {
     const stroopsIn = parseEther(amount || "0") / XLM_TO_WEI_SCALE;
     if (stroopsIn <= 0n) throw new Error("Enter an amount");
 
-    const { hookData, mintRecipientBytes32, destinationCaller } = buildEvmDestHook(dest, address);
+    // Raw-USDC mode is never available with a Stellar source (see the
+    // toggle's exclusion rule in SwapCard) — always swap-mode here.
+    const { hookData, mintRecipientBytes32, destinationCaller } = buildEvmDestHook(dest, address, false);
     const sign = stellarWallet.signTransaction;
 
     // Trustline: a real Stellar ACCOUNT needs one for classic-asset-backed
@@ -571,6 +630,9 @@ export function useSwapFlow() {
     try {
       if (dest.isStellar && !isValidStellarRecipient(stellarRecipient)) {
         throw new Error("Enter a valid Stellar recipient address (G...)");
+      }
+      if (insufficientFunds) {
+        throw new Error("Amount exceeds your balance");
       }
 
       if (source.isStellar) {
@@ -653,15 +715,17 @@ export function useSwapFlow() {
         // arbitrary prices; production quoting sets a real slippage floor)
         // are baked into buildEvmDestHook, shared with the Stellar-source
         // path above.
-        ({ mintRecipientBytes32, destinationCaller, hookData } = buildEvmDestHook(dest, address!));
+        ({ mintRecipientBytes32, destinationCaller, hookData } = buildEvmDestHook(dest, address!, rawUsdcDest));
       }
 
       let hash: `0x${string}`;
 
-      if (source.nativeIsUsdc) {
+      if (rawUsdcSource) {
         // Arc as source: native balance already IS USDC, so there's no swap
         // and no Conduit contract — burn directly from the EOA via the
         // standard TokenMessenger, same mechanics as any CCTP integrator.
+        // Raw-USDC mode (any other leg, user-selected) takes the identical
+        // path against that chain's canonical CCTP contracts/testnet USDC.
         const usdcAmount = parseEther(amount || "0") / NATIVE_TO_USDC_SCALE;
         const allowance = await sourcePublicClient!.readContract({
           address: source.usdc!,
@@ -733,7 +797,7 @@ export function useSwapFlow() {
       await fetch("/api/swaps", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ burnTxHash: hash, from, to }),
+        body: JSON.stringify({ burnTxHash: hash, from, to, assetMode: rawUsdcDest ? "usdc" : "swap" }),
       });
     } catch (e) {
       const msg =
@@ -754,6 +818,9 @@ export function useSwapFlow() {
     writeContractAsync,
     stellarRecipient,
     swapFromStellar,
+    rawUsdcSource,
+    rawUsdcDest,
+    insufficientFunds,
   ]);
 
   const busy =
@@ -774,11 +841,18 @@ export function useSwapFlow() {
     dest,
     stellarRecipient,
     setStellarRecipient,
+    // asset mode (swap vs raw USDC)
+    assetMode,
+    setAssetMode,
+    assetModeAllowed,
+    rawUsdcSource,
+    rawUsdcDest,
     // quote
     maxFee,
     usdcEstimate,
     quote,
     balance,
+    insufficientFunds,
     // execution + tracking
     swap,
     track,

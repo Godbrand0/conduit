@@ -106,8 +106,12 @@ export async function relaySwap(
     try {
       // Arc has no ReceiveAndSwap executor (nothing to swap into — native
       // balance already is USDC), so relay via the plain MessageTransmitter
-      // instead of relayAndExecute.
-      const relayTxHash = dest.nativeIsUsdc
+      // instead of relayAndExecute. Same for any other leg where the user
+      // chose raw-USDC mode (see SwapCard's toggle / useSwap's assetMode) —
+      // that choice was persisted per-swap since it isn't a static fact of
+      // the destination leg the way Arc's nativeIsUsdc is.
+      const rawUsdc = dest.nativeIsUsdc || existing?.assetMode === "usdc";
+      const relayTxHash = rawUsdc
         ? await wallet.writeContract({
             address: dest.messageTransmitter!,
             abi: MESSAGE_TRANSMITTER_ABI,
