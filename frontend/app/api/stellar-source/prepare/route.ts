@@ -5,12 +5,15 @@ import {
   Address,
   Asset,
   Operation,
+  StrKey,
   TransactionBuilder,
   Networks,
   BASE_FEE,
   nativeToScVal,
 } from "@stellar/stellar-sdk";
 import { LEGS } from "@/lib/legs";
+import { rateLimit } from "@/lib/ratelimit";
+import { STELLAR_NETWORK_PASSPHRASE, STELLAR_RPC_URL, STELLAR_USDC_ISSUER } from "@/lib/stellarNetwork";
 
 /**
  * Builds an UNSIGNED (but simulated/prepared, footprint + resource fees
@@ -23,21 +26,24 @@ import { LEGS } from "@/lib/legs";
  * Soroban only allows one contract-invoking operation per transaction, so
  * each step here is prepared and signed separately — up to three sequential
  * signatures for a user starting from native XLM (swap, approve, burn), two
- * if they already hold USDC (approve, burn). The classic `changeTrust`
- * step is also built here since a real Stellar ACCOUNT needs a trustline for
- * classic-asset-backed SAC tokens like USDC before it can hold a balance —
- * verified live (scripts/verify-soroswap-router.ts); contracts never need
- * this (Phase 1's swap_and_deliver never hit it because USDC there is held
- * by a contract, not an account).
+ * if they already hold USDC. The classic `changeTrust` step is also built
+ * here since a real Stellar ACCOUNT needs a trustline for classic-asset-
+ * backed SAC tokens like USDC before it can hold a balance — verified live
+ * (scripts/verify-soroswap-router.ts); contracts never need this (Phase 1's
+ * swap_and_deliver never hit it because USDC there is held by a contract,
+ * not an account).
  *
  * This route never signs anything — it has no access to the user's key.
+ *
+ * It does, however, decide what the user is asked to sign, and the browser
+ * supplies the parameters. Every one of them is therefore validated below,
+ * against an allowlist where the value is an address. Unvalidated, this
+ * endpoint would build — from the application's own trusted origin — a USDC
+ * approval for any spender, or a CCTP burn to any destination with any hook:
+ * a phishing amplifier against users who reasonably trust an XDR that came
+ * from the real app.
  */
-
-const RPC_URL = "https://soroban-testnet.stellar.org";
 const SOROSWAP_ROUTER = "CCJUD55AG6W5HAI5LRVNKAE5WDP5XGZBUDS5WNTIVDU7O264UZZE7BRD";
-// USDC's SAC wraps this classic asset — read live via the SAC's own name()
-// during development (see DEPLOYMENTS.md), not guessed from docs.
-const USDC_ISSUER = "GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5";
 
 type Body =
   | { step: "trustline"; publicKey: string }
@@ -54,20 +60,79 @@ type Body =
       hookDataHex: string;
     };
 
+/** A positive integer amount, as a decimal string, that fits an i128. */
+function parseAmount(value: unknown): bigint | null {
+  if (typeof value !== "string" || !/^[0-9]{1,39}$/.test(value)) return null;
+  try {
+    const parsed = BigInt(value);
+    if (parsed <= 0n || parsed > 2n ** 127n - 1n) return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+/** A non-negative i128 amount — maxFee may legitimately be zero. */
+function parseFee(value: unknown): bigint | null {
+  if (typeof value !== "string" || !/^[0-9]{1,39}$/.test(value)) return null;
+  try {
+    const parsed = BigInt(value);
+    if (parsed < 0n || parsed > 2n ** 127n - 1n) return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+function parseHex(value: unknown, maxBytes: number): Buffer | null {
+  if (typeof value !== "string") return null;
+  const stripped = value.replace(/^0x/, "");
+  if (stripped.length === 0 || stripped.length % 2 !== 0) return null;
+  if (!/^[0-9a-fA-F]+$/.test(stripped)) return null;
+  if (stripped.length / 2 > maxBytes) return null;
+  return Buffer.from(stripped, "hex");
+}
+
+function badRequest(message: string) {
+  return NextResponse.json({ error: message }, { status: 400 });
+}
+
 export async function POST(req: NextRequest) {
+  if (!rateLimit(req, "stellar:prepare", 30, 60_000)) {
+    return NextResponse.json({ error: "rate limited" }, { status: 429 });
+  }
+
   const body = (await req.json()) as Body;
   const source = LEGS.stellar;
   if (!source?.isStellar) {
     return NextResponse.json({ error: "stellar leg misconfigured" }, { status: 500 });
   }
 
+  // The account whose transaction this is must be a real Stellar account
+  // address — every step below builds against it.
+  if (typeof body.publicKey !== "string" || !StrKey.isValidEd25519PublicKey(body.publicKey)) {
+    return badRequest("invalid publicKey");
+  }
+
+  // The only destinations Conduit ever asks a user to approve or burn to.
+  // Anything else is not a Conduit transaction and this route will not build
+  // it, whoever is asking.
+  const permittedSpenders = new Set([source.stellarTokenMessengerMinter, SOROSWAP_ROUTER].filter(Boolean));
+  const permittedMintRecipients = new Set(
+    Object.values(LEGS)
+      .map((leg) => leg.executor?.toLowerCase())
+      .filter(Boolean)
+  );
+  const permittedDomains = new Set(Object.values(LEGS).map((leg) => leg.domain));
+
   try {
-    const server = new rpc.Server(RPC_URL);
+    const server = new rpc.Server(STELLAR_RPC_URL);
     const account = await server.getAccount(body.publicKey);
+    const networkPassphrase = STELLAR_NETWORK_PASSPHRASE;
 
     if (body.step === "trustline") {
-      const tx = new TransactionBuilder(account, { fee: BASE_FEE, networkPassphrase: Networks.TESTNET })
-        .addOperation(Operation.changeTrust({ asset: new Asset("USDC", USDC_ISSUER) }))
+      const tx = new TransactionBuilder(account, { fee: BASE_FEE, networkPassphrase })
+        .addOperation(Operation.changeTrust({ asset: new Asset("USDC", STELLAR_USDC_ISSUER) }))
         .setTimeout(60)
         .build();
       // Classic operation — no Soroban simulation/footprint needed.
@@ -75,13 +140,20 @@ export async function POST(req: NextRequest) {
     }
 
     if (body.step === "swap") {
-      const xlm = Asset.native().contractId(Networks.TESTNET);
-      const tx = new TransactionBuilder(account, { fee: BASE_FEE, networkPassphrase: Networks.TESTNET })
+      const amountIn = parseAmount(body.amountIn);
+      const amountOutMin = parseAmount(body.amountOutMin);
+      if (amountIn === null) return badRequest("invalid amountIn");
+      // A zero floor is exactly the placeholder this audit removed
+      // everywhere else; refuse to build an unprotected swap here too.
+      if (amountOutMin === null) return badRequest("invalid amountOutMin");
+
+      const xlm = Asset.native().contractId(networkPassphrase);
+      const tx = new TransactionBuilder(account, { fee: BASE_FEE, networkPassphrase })
         .addOperation(
           new Contract(SOROSWAP_ROUTER).call(
             "swap_exact_tokens_for_tokens",
-            nativeToScVal(BigInt(body.amountIn), { type: "i128" }),
-            nativeToScVal(BigInt(body.amountOutMin), { type: "i128" }),
+            nativeToScVal(amountIn, { type: "i128" }),
+            nativeToScVal(amountOutMin, { type: "i128" }),
             nativeToScVal([Address.fromString(xlm), Address.fromString(source.stellarUsdc!)]),
             new Address(body.publicKey).toScVal(),
             nativeToScVal(Math.floor(Date.now() / 1000) + 300, { type: "u64" })
@@ -94,14 +166,20 @@ export async function POST(req: NextRequest) {
     }
 
     if (body.step === "approve") {
+      const amount = parseAmount(body.amount);
+      if (amount === null) return badRequest("invalid amount");
+      if (typeof body.spender !== "string" || !permittedSpenders.has(body.spender)) {
+        return badRequest("spender is not a Conduit contract");
+      }
+
       const ledger = await server.getLatestLedger();
-      const tx = new TransactionBuilder(account, { fee: BASE_FEE, networkPassphrase: Networks.TESTNET })
+      const tx = new TransactionBuilder(account, { fee: BASE_FEE, networkPassphrase })
         .addOperation(
           new Contract(source.stellarUsdc!).call(
             "approve",
             new Address(body.publicKey).toScVal(),
             new Address(body.spender).toScVal(),
-            nativeToScVal(BigInt(body.amount), { type: "i128" }),
+            nativeToScVal(amount, { type: "i128" }),
             nativeToScVal(ledger.sequence + 100_000, { type: "u32" }) // ~5.7 days at 5s/ledger
           )
         )
@@ -112,19 +190,45 @@ export async function POST(req: NextRequest) {
     }
 
     if (body.step === "burn") {
-      const tx = new TransactionBuilder(account, { fee: BASE_FEE, networkPassphrase: Networks.TESTNET })
+      const amount = parseAmount(body.amount);
+      const maxFee = parseFee(body.maxFee);
+      const mintRecipient = parseHex(body.mintRecipientHex, 32);
+      const destinationCaller = parseHex(body.destinationCallerHex, 32);
+      // Circle's 32-byte header + two 56-char strkeys with 4-byte length
+      // prefixes + Conduit's 16-byte min-out field.
+      const hookData = parseHex(body.hookDataHex, 256);
+
+      if (amount === null) return badRequest("invalid amount");
+      if (maxFee === null) return badRequest("invalid maxFee");
+      if (mintRecipient === null || mintRecipient.length !== 32) return badRequest("invalid mintRecipient");
+      if (destinationCaller === null || destinationCaller.length !== 32) {
+        return badRequest("invalid destinationCaller");
+      }
+      if (hookData === null) return badRequest("invalid hookData");
+      if (typeof body.destinationDomain !== "number" || !permittedDomains.has(body.destinationDomain)) {
+        return badRequest("unknown destinationDomain");
+      }
+      // The burn must mint to a Conduit executor. mintRecipient is a
+      // left-padded 20-byte EVM address here (Stellar source always targets
+      // an EVM destination), so compare its low 20 bytes.
+      const mintRecipientAddress = `0x${mintRecipient.subarray(12).toString("hex")}`;
+      if (!permittedMintRecipients.has(mintRecipientAddress)) {
+        return badRequest("mintRecipient is not a Conduit executor");
+      }
+
+      const tx = new TransactionBuilder(account, { fee: BASE_FEE, networkPassphrase })
         .addOperation(
           new Contract(source.stellarTokenMessengerMinter!).call(
             "deposit_for_burn_with_hook",
             new Address(body.publicKey).toScVal(),
-            nativeToScVal(BigInt(body.amount), { type: "i128" }),
+            nativeToScVal(amount, { type: "i128" }),
             nativeToScVal(body.destinationDomain, { type: "u32" }),
-            nativeToScVal(Buffer.from(body.mintRecipientHex.replace(/^0x/, ""), "hex"), { type: "bytes" }),
+            nativeToScVal(mintRecipient, { type: "bytes" }),
             new Address(source.stellarUsdc!).toScVal(),
-            nativeToScVal(Buffer.from(body.destinationCallerHex.replace(/^0x/, ""), "hex"), { type: "bytes" }),
-            nativeToScVal(BigInt(body.maxFee), { type: "i128" }),
+            nativeToScVal(destinationCaller, { type: "bytes" }),
+            nativeToScVal(maxFee, { type: "i128" }),
             nativeToScVal(1000, { type: "u32" }), // fast finality, matches every other leg's convention
-            nativeToScVal(Buffer.from(body.hookDataHex.replace(/^0x/, ""), "hex"), { type: "bytes" })
+            nativeToScVal(hookData, { type: "bytes" })
           )
         )
         .setTimeout(60)
@@ -133,11 +237,11 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ xdr: prepared.toXdr() });
     }
 
-    return NextResponse.json({ error: "unknown step" }, { status: 400 });
+    return badRequest("unknown step");
   } catch (e) {
-    return NextResponse.json(
-      { error: e instanceof Error ? e.message : "prepare failed" },
-      { status: 502 }
-    );
+    // The underlying RPC error is for operators, not for whoever is probing
+    // this endpoint.
+    console.error("stellar-source/prepare failed", e);
+    return NextResponse.json({ error: "could not prepare transaction" }, { status: 502 });
   }
 }

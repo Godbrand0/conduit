@@ -46,10 +46,15 @@ export function createSqliteStore() {
     ).run(burnTxHash, fromChain, toChain, assetMode, Date.now(), Date.now());
   }
 
+  const UPDATABLE_COLUMNS = new Set(["status", "relayTxHash", "error", "usdcAmount"]);
+
   async function updateSwap(burnTxHash: string, fields: UpdatableSwapFields) {
     const sets: string[] = ["updatedAt = ?"];
     const vals: (string | number)[] = [Date.now()];
     for (const [k, v] of Object.entries(fields)) {
+      // Column names land in a SQL identifier position, so they are checked
+      // against an allowlist rather than trusted. See db-postgres.ts.
+      if (!UPDATABLE_COLUMNS.has(k)) throw new Error(`refusing to update unknown column: ${k}`);
       sets.push(`${k} = ?`);
       vals.push(v as string);
     }

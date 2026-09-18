@@ -2,12 +2,23 @@ import { Pool } from "pg";
 import type { PlatformStats, SwapRow, UpdatableSwapFields } from "./db";
 
 export async function createPostgresStore() {
-  // Neon/Supabase pooled connections terminate TLS with certs not in Node's
-  // default trust store; rejectUnauthorized:false matches what both providers'
-  // own connection snippets recommend for serverless.
+  // Verify the database server's certificate by default. Neon/Supabase
+  // connection snippets commonly suggest rejectUnauthorized:false, and this
+  // used to follow that — but it accepts *any* certificate, leaving the
+  // connection encrypted yet unauthenticated and open to anyone on the
+  // network path. Providers whose chain isn't in Node's default trust store
+  // should supply their CA via DATABASE_CA_CERT rather than disabling the
+  // check. DATABASE_SSL_NO_VERIFY remains as a deliberate, visible escape
+  // hatch for local development only.
+  const ssl = process.env.DATABASE_SSL_NO_VERIFY === "true"
+    ? { rejectUnauthorized: false }
+    : process.env.DATABASE_CA_CERT
+      ? { rejectUnauthorized: true, ca: process.env.DATABASE_CA_CERT }
+      : { rejectUnauthorized: true };
+
   const pool = new Pool({
     connectionString: process.env.DATABASE_URL,
-    ssl: { rejectUnauthorized: false },
+    ssl,
   });
 
   await pool.query(`CREATE TABLE IF NOT EXISTS swaps (
@@ -56,8 +67,17 @@ export async function createPostgresStore() {
     );
   }
 
+  // Column names are interpolated into the UPDATE below, so they are checked
+  // against this allowlist first. Every current caller passes literal keys,
+  // but nothing in the type system stops a future one from forwarding
+  // user-controlled object keys into a SQL identifier position.
+  const UPDATABLE_COLUMNS = new Set(["status", "relayTxHash", "error", "usdcAmount"]);
+
   async function updateSwap(burnTxHash: string, fields: UpdatableSwapFields) {
     const cols = Object.keys(fields);
+    for (const col of cols) {
+      if (!UPDATABLE_COLUMNS.has(col)) throw new Error(`refusing to update unknown column: ${col}`);
+    }
     const sets = cols.map((c, i) => `"${c}" = $${i + 2}`);
     sets.push(`"updatedAt" = $${cols.length + 2}`);
     const vals = cols.map((c) => fields[c as keyof UpdatableSwapFields]);
