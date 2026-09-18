@@ -18,15 +18,29 @@ import {IERC20} from "./interfaces/IERC20.sol";
 ///   3. The hook — abi.encode(address target, bytes calldata_, uint256
 ///      forwardAmount), the cctp-sdk/core wire format — is parsed straight from
 ///      the attested message, so a relayer cannot substitute its own instructions.
-///   4. The target is called with the calldata after approving it for the USDC.
-///      For Conduit swaps the target is this same contract's `swapUsdcToNative`
-///      or `swapUsdcToToken`.
-///   5. If the hook call fails (e.g. slippage floor hit), the minted USDC is
-///      refunded to the burn message's `messageSender` — funds never strand.
+///   4. The hook must target this contract's own `swapUsdcToNative` or
+///      `swapUsdcToToken`; anything else is refunded rather than executed.
+///   5. If the hook call fails (e.g. slippage floor hit), the USDC is refunded
+///      to the recipient named in the hook calldata — funds never strand.
 ///
 /// @dev Message layout (CCTP V2): 148-byte header, then BurnMessageV2 body in
 /// which hookData starts at byte 228 — absolute offset 376. `messageSender`
 /// sits at body offset 100 — absolute 248.
+///
+/// @dev Two earlier weaknesses shaped the current design and are worth stating
+/// so they don't get reintroduced:
+///
+///   * The hook target used to be called as-is. Since anyone can originate a
+///     CCTP burn naming this contract as `mintRecipient` with any hookData they
+///     like, that was an arbitrary-call primitive rentable for the price of a
+///     minimal burn. Targets are now restricted to this contract's two swap
+///     entry points.
+///   * Amounts used to be derived from `usdc.balanceOf(address(this))` deltas.
+///     Because every production hook asks to swap "everything", donating a
+///     single µUSDC to this contract made the post-hook subtraction underflow
+///     and reverted every relay permanently. All amounts are now tracked
+///     explicitly in `_pendingAmount`, so the contract's resting balance can
+///     never influence a relay.
 contract ReceiveAndSwap {
     IMessageTransmitterV2 public immutable messageTransmitter;
     IERC20 public immutable usdc;
@@ -40,14 +54,21 @@ contract ReceiveAndSwap {
 
     uint256 private _lock = 1;
 
+    /// @dev USDC the currently-executing hook is allowed to spend, decremented
+    /// as it spends. Zero outside a relay. This is the contract's entire notion
+    /// of "how much is in play" — deliberately never `balanceOf`.
+    uint256 private _pendingAmount;
+
     error NothingMinted();
     error NotOwner();
     error NotSelf();
     error Reentrancy();
     error NativeSendFailed();
+    error TransferFailed();
 
     event HookExecuted(address indexed target, uint256 usdcAmount);
     event HookFailed(address indexed refundTo, uint256 usdcRefunded);
+    event HookRejected(address indexed target, address indexed refundTo, uint256 usdcRefunded);
     event NoHookRefund(address indexed refundTo, uint256 usdcRefunded);
     event SwapDelivered(address indexed recipient, address indexed tokenOut, uint256 amountOut);
     event SwapRefunded(address indexed recipient, uint256 usdcRefunded);
@@ -91,42 +112,65 @@ contract ReceiveAndSwap {
         uint256 minted = usdc.balanceOf(address(this)) - balanceBefore;
         if (minted == 0) revert NothingMinted();
 
-        address refundTo = address(uint160(uint256(bytes32(message[MESSAGE_SENDER_OFFSET:MESSAGE_SENDER_OFFSET + 32]))));
+        address messageSender =
+            address(uint160(uint256(bytes32(message[MESSAGE_SENDER_OFFSET:MESSAGE_SENDER_OFFSET + 32]))));
 
         if (message.length <= HOOK_DATA_OFFSET) {
             // Mint aimed at this contract with no instructions — return funds.
-            usdc.transfer(refundTo, minted);
-            emit NoHookRefund(refundTo, minted);
+            // messageSender is the only address available here. It may be a
+            // source-chain contract with no counterpart on this chain, so this
+            // path is best-effort only; no Conduit flow produces it.
+            _safeTransfer(messageSender, minted);
+            emit NoHookRefund(messageSender, minted);
             return;
         }
 
         (address target, bytes memory data, uint256 forwardAmount) =
             abi.decode(message[HOOK_DATA_OFFSET:], (address, bytes, uint256));
 
+        // Refunds go to the recipient named in the hook, never to
+        // messageSender: for a SwapAndBurn-originated transfer messageSender is
+        // a contract address on the *source* chain, and the same address on
+        // this chain is usually nobody at all.
+        address refundTo = _hookRecipient(data);
+        if (refundTo == address(0)) refundTo = messageSender;
+
+        if (!_isPermittedHook(target, data)) {
+            _safeTransfer(refundTo, minted);
+            emit HookRejected(target, refundTo, minted);
+            return;
+        }
+
         // forwardAmount of 0 means "all"; Fast Transfer fees make the exact
         // minted amount unknowable at burn time, so clamp to what arrived.
         uint256 amount = (forwardAmount == 0 || forwardAmount > minted) ? minted : forwardAmount;
 
-        usdc.approve(target, amount);
-        (bool ok,) = target.call(data);
-        usdc.approve(target, 0);
+        _pendingAmount = amount;
+        (bool ok,) = address(this).call(data);
+        // A reverted sub-call rolls back its own decrements, so `unspent` is
+        // the full amount in that case — exactly what we want to refund.
+        uint256 unspent = _pendingAmount;
+        _pendingAmount = 0;
 
-        uint256 remaining = usdc.balanceOf(address(this)) - balanceBefore;
+        // Sweep everything the hook didn't consume — both the part of its own
+        // budget it left unspent and, for a partial `forwardAmount`, the
+        // minted USDC that was never offered to it in the first place.
+        uint256 spent = amount - unspent;
+        uint256 leftover = minted - spent;
+        if (leftover > 0) _safeTransfer(refundTo, leftover);
         if (ok) {
-            emit HookExecuted(target, amount);
-            // Sweep any USDC the hook didn't consume (partial forwardAmount).
-            if (remaining > 0) usdc.transfer(refundTo, remaining);
+            emit HookExecuted(target, spent);
         } else {
-            usdc.transfer(refundTo, remaining);
-            emit HookFailed(refundTo, remaining);
+            emit HookFailed(refundTo, leftover);
         }
     }
 
     /// @notice Hook target: swap USDC for the chain's native token via Uniswap V3
     /// and deliver it to `recipient`.
-    /// @param amountIn USDC to swap; 0 means the contract's full balance — used by
-    /// contract-initiated burns (SwapAndBurn) where the minted amount isn't known
-    /// at sign time.
+    /// @param amountIn USDC to swap; 0 means the whole amount this relay put in
+    /// play — used by contract-initiated burns (SwapAndBurn) where the minted
+    /// amount isn't known at sign time. Always clamped to that amount, so a hook
+    /// can never reach the contract's resting balance.
     /// @dev Never reverts on swap failure: slippage refunds USDC straight to
     /// `recipient` (whose address is part of the attested hookData), so refunds
     /// work even when the burn's messageSender is a source-chain contract. If the
@@ -135,8 +179,8 @@ contract ReceiveAndSwap {
         external
         onlySelf
     {
-        if (amountIn == 0) amountIn = usdc.balanceOf(address(this));
-        usdc.approve(address(swapRouter), amountIn);
+        amountIn = _claim(amountIn);
+        _safeApprove(address(swapRouter), amountIn);
         try swapRouter.exactInputSingle(
             ISwapRouter02.ExactInputSingleParams({
                 tokenIn: address(usdc),
@@ -158,8 +202,8 @@ contract ReceiveAndSwap {
                 emit SwapDelivered(recipient, address(weth), wethOut);
             }
         } catch {
-            usdc.approve(address(swapRouter), 0);
-            usdc.transfer(recipient, amountIn);
+            _safeApprove(address(swapRouter), 0);
+            _safeTransfer(recipient, amountIn);
             emit SwapRefunded(recipient, amountIn);
         }
     }
@@ -174,8 +218,8 @@ contract ReceiveAndSwap {
         uint256 minOut,
         address recipient
     ) external onlySelf {
-        if (amountIn == 0) amountIn = usdc.balanceOf(address(this));
-        usdc.approve(address(swapRouter), amountIn);
+        amountIn = _claim(amountIn);
+        _safeApprove(address(swapRouter), amountIn);
         try swapRouter.exactInputSingle(
             ISwapRouter02.ExactInputSingleParams({
                 tokenIn: address(usdc),
@@ -189,8 +233,8 @@ contract ReceiveAndSwap {
         ) returns (uint256 amountOut) {
             emit SwapDelivered(recipient, tokenOut, amountOut);
         } catch {
-            usdc.approve(address(swapRouter), 0);
-            usdc.transfer(recipient, amountIn);
+            _safeApprove(address(swapRouter), 0);
+            _safeTransfer(recipient, amountIn);
             emit SwapRefunded(recipient, amountIn);
         }
     }
@@ -198,12 +242,66 @@ contract ReceiveAndSwap {
     /// @notice Recover tokens stranded by a receiveMessage that bypassed
     /// relayAndExecute (e.g. someone relayed directly on the MessageTransmitter).
     function rescueToken(address token, address to, uint256 amount) external onlyOwner {
-        IERC20(token).transfer(to, amount);
+        _safeTransferToken(IERC20(token), to, amount);
     }
 
     function rescueNative(address to, uint256 amount) external onlyOwner {
         (bool sent,) = to.call{value: amount}("");
         if (!sent) revert NativeSendFailed();
+    }
+
+    /// @dev Take `amountIn` out of the current relay's budget, clamped to what
+    /// is actually in play. `0` means the whole remaining budget.
+    function _claim(uint256 amountIn) private returns (uint256) {
+        uint256 budget = _pendingAmount;
+        if (amountIn == 0 || amountIn > budget) amountIn = budget;
+        _pendingAmount = budget - amountIn;
+        return amountIn;
+    }
+
+    /// @dev A hook is permitted only if it re-enters this contract through one
+    /// of the two swap entry points. Both are `onlySelf`, and the owner-only
+    /// rescue functions are unreachable this way (msg.sender would be this
+    /// contract, not the owner) — but the explicit allowlist means a future
+    /// self-callable function can't silently widen the hook surface.
+    function _isPermittedHook(address target, bytes memory data) private view returns (bool) {
+        if (target != address(this)) return false;
+        if (data.length < 4) return false;
+        bytes4 selector;
+        assembly {
+            selector := mload(add(data, 32))
+        }
+        return selector == this.swapUsdcToNative.selector || selector == this.swapUsdcToToken.selector;
+    }
+
+    /// @dev `recipient` is the last argument of both swap entry points, so the
+    /// final word of the calldata is the refund address. Returns address(0) if
+    /// the calldata isn't shaped like a valid ABI-encoded call.
+    function _hookRecipient(bytes memory data) private pure returns (address) {
+        if (data.length < 36 || (data.length - 4) % 32 != 0) return address(0);
+        bytes32 lastWord;
+        assembly {
+            lastWord := mload(add(data, mload(data)))
+        }
+        return address(uint160(uint256(lastWord)));
+    }
+
+    function _safeTransfer(address to, uint256 amount) private {
+        _safeTransferToken(usdc, to, amount);
+    }
+
+    /// @dev Tolerates both reverting and `false`-returning ERC20s, and the
+    /// non-standard ones that return nothing at all.
+    function _safeTransferToken(IERC20 token, address to, uint256 amount) private {
+        (bool ok, bytes memory ret) =
+            address(token).call(abi.encodeWithSelector(token.transfer.selector, to, amount));
+        if (!ok || (ret.length > 0 && !abi.decode(ret, (bool)))) revert TransferFailed();
+    }
+
+    function _safeApprove(address spender, uint256 amount) private {
+        (bool ok, bytes memory ret) =
+            address(usdc).call(abi.encodeWithSelector(usdc.approve.selector, spender, amount));
+        if (!ok || (ret.length > 0 && !abi.decode(ret, (bool)))) revert TransferFailed();
     }
 
     /// @dev Accept ETH from WETH.withdraw.

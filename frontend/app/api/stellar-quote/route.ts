@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
-import { rpc, Contract, scValToNative, TransactionBuilder, Networks, BASE_FEE, Account, Keypair } from "@stellar/stellar-sdk";
+import { rpc, Contract, scValToNative, TransactionBuilder, BASE_FEE, Account, Keypair } from "@stellar/stellar-sdk";
 import { LEGS } from "@/lib/legs";
+import { rateLimit } from "@/lib/ratelimit";
+import { STELLAR_NETWORK_PASSPHRASE } from "@/lib/stellarNetwork";
 
 /**
  * Proxy Soroban RPC's simulateTransaction so the browser can spot-quote the
@@ -36,7 +38,7 @@ const RESERVES_TTL_MS = 3_000;
 async function simulate(server: rpc.Server, pair: Contract, fn: string) {
   const tx = new TransactionBuilder(DUMMY_SOURCE, {
     fee: BASE_FEE,
-    networkPassphrase: Networks.TESTNET,
+    networkPassphrase: STELLAR_NETWORK_PASSPHRASE,
   })
     .addOperation(pair.call(fn))
     .setTimeout(30)
@@ -47,6 +49,10 @@ async function simulate(server: rpc.Server, pair: Contract, fn: string) {
 }
 
 export async function GET(req: NextRequest) {
+  if (!rateLimit(req, "stellar:quote", 60, 60_000)) {
+    return NextResponse.json({ error: "rate limited" }, { status: 429 });
+  }
+
   const key = req.nextUrl.searchParams.get("to") ?? req.nextUrl.searchParams.get("from") ?? "";
   const dest = LEGS[key];
   if (!dest?.isStellar) {
@@ -81,9 +87,7 @@ export async function GET(req: NextRequest) {
       reserveXlm: (usdcIsToken0 ? reserve1 : reserve0).toString(),
     });
   } catch (e) {
-    return NextResponse.json(
-      { error: e instanceof Error ? e.message : "quote failed" },
-      { status: 502 }
-    );
+    console.error("stellar-quote failed", e);
+    return NextResponse.json({ error: "quote failed" }, { status: 502 });
   }
 }

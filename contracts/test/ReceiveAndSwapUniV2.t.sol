@@ -199,8 +199,44 @@ contract ReceiveAndSwapUniV2Test is Test {
         ras.relayAndExecute(message, hex"");
 
         assertEq(user.balance, expectedEth, "swapped the forward amount");
-        assertEq(usdc.balanceOf(sourceSender), MINTED - forward, "remainder swept to sender");
+        // Remainder goes to the hook's own recipient, not to messageSender —
+        // messageSender is a source-chain contract address that usually
+        // belongs to nobody on this chain.
+        assertEq(usdc.balanceOf(user), MINTED - forward, "remainder swept to hook recipient");
         assertEq(usdc.balanceOf(address(ras)), 0, "no USDC stranded");
+    }
+
+    /// Regression: a hook may only re-enter this contract's own swap entry
+    /// point. Anyone can originate a CCTP burn naming this contract as
+    /// mintRecipient with arbitrary hookData, so an unrestricted target was an
+    /// arbitrary-call primitive rentable for the price of a minimal burn.
+    function test_foreignHookTarget_isRejectedAndRefunded() public {
+        address attacker = makeAddr("attacker");
+        bytes memory data = abi.encodeWithSelector(MockUSDC.transfer.selector, attacker, MINTED);
+        bytes memory message =
+            _buildMessage(address(ras), abi.encode(address(usdc), data, uint256(0)));
+
+        ras.relayAndExecute(message, hex"");
+
+        assertEq(usdc.balanceOf(attacker), 0, "foreign target never called");
+        assertEq(usdc.balanceOf(address(ras)), 0, "no USDC stranded");
+    }
+
+    /// Regression: the contract's resting balance must not influence a relay.
+    /// Amounts used to come from balanceOf deltas, so donating a single µUSDC
+    /// made the post-hook subtraction underflow and bricked every relay.
+    function test_donatedUsdc_doesNotBlockRelay() public {
+        usdc.mint(address(ras), 1); // attacker donates 1 µUSDC
+        uint256 expectedEth = (MINTED * router.RATE()) / 1e6;
+        bytes memory data =
+            abi.encodeCall(ReceiveAndSwapUniV2.swapUsdcToNative, (0, expectedEth, user));
+        bytes memory message =
+            _buildMessage(address(ras), abi.encode(address(ras), data, uint256(0)));
+
+        ras.relayAndExecute(message, hex"");
+
+        assertEq(user.balance, expectedEth, "relay still delivered the full swap");
+        assertEq(usdc.balanceOf(address(ras)), 1, "donation left untouched, not swept into the swap");
     }
 
     function test_noHookData_refundsToSender() public {

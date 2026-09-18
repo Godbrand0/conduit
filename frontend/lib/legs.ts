@@ -13,7 +13,7 @@ import { arcTestnet } from "./arcChain";
  * CCTP TokenMessenger/MessageTransmitter directly, via the fields under
  * "Arc-only fields" below.
  */
-export type Leg = {
+export type Leg = { 
   key: string;
   label: string;
   /** Short display name for compact UI */

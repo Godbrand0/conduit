@@ -13,3 +13,14 @@ soroban-sdk = { workspace = true }
 
 [dev-dependencies]
 soroban-sdk = { workspace = true, features = ["testutils"] }
+# Tests must produce REAL attestation signatures now that the contract
+# verifies them, rather than handing it an unverified buffer.
+k256 = { version = "0.13", features = ["ecdsa"] }
+sha3 = "0.10"
+# soroban-env-host 22.1.3 declares `ed25519-dalek = ">=2.0.0"`, so cargo
+# resolves 3.0.0 — but its own testutils calls SigningKey::generate() against
+# trait bounds only the 2.x line satisfies, which made `cargo test` fail to
+# COMPILE for reasons unrelated to this contract. Capping it here narrows the
+# open-ended requirement to a version that actually works, which is what
+# makes the test suite below runnable at all.
+ed25519-dalek = "=2.2.0"

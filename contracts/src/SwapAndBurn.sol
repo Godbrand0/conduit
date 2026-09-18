@@ -21,6 +21,13 @@ import {IERC20} from "./interfaces/IERC20.sol";
 /// messageSender. Pair only with ReceiveAndSwap >= the version that refunds
 /// in-swap. The hook's amountIn should be 0 ("swap all minted USDC"), since
 /// the USDC output of the source swap is unknown at signing time.
+///
+/// @dev `swapAndBurnToken` accepts a caller-chosen `tokenIn` and therefore
+/// makes external calls to untrusted code. Both entry points are
+/// `nonReentrant`, all token calls check their return value, and amounts are
+/// measured as real balance deltas rather than trusting the requested amount,
+/// so fee-on-transfer and non-standard tokens cannot desynchronise the
+/// accounting or reach the fee treasury.
 contract SwapAndBurn {
     ITokenMessengerV2 public immutable tokenMessenger;
     IERC20 public immutable usdc;
@@ -29,13 +36,22 @@ contract SwapAndBurn {
     address public immutable owner;
 
     /// @notice Conduit protocol fee in basis points, skimmed from the USDC
-    /// output of the source swap before burning. Accumulates in this contract
-    /// as treasury; withdrawable by the owner.
+    /// output of the source swap before burning.
     uint256 public constant FEE_BPS = 5; // 0.05%
+
+    /// @notice USDC accrued as protocol fees and withdrawable by the owner.
+    /// Tracked explicitly so `withdrawFees` can never reach USDC that is
+    /// mid-flight or was sent here by mistake.
+    uint256 public accruedFees;
+
+    uint256 private _lock = 1;
 
     error NothingSent();
     error UsdcBelowFee();
     error NotOwner();
+    error Reentrancy();
+    error TransferFailed();
+    error AmountExceedsAccruedFees();
 
     event BurnInitiated(
         address indexed sender,
@@ -50,6 +66,13 @@ contract SwapAndBurn {
     modifier onlyOwner() {
         if (msg.sender != owner) revert NotOwner();
         _;
+    }
+
+    modifier nonReentrant() {
+        if (_lock != 1) revert Reentrancy();
+        _lock = 2;
+        _;
+        _lock = 1;
     }
 
     constructor(address tokenMessenger_, address usdc_, address swapRouter_, address weth_) {
@@ -72,10 +95,10 @@ contract SwapAndBurn {
         uint256 maxFee,
         uint32 minFinalityThreshold,
         bytes calldata hookData
-    ) external payable returns (uint256 usdcBurned) {
+    ) external payable nonReentrant returns (uint256 usdcBurned) {
         if (msg.value == 0) revert NothingSent();
         weth.deposit{value: msg.value}();
-        weth.approve(address(swapRouter), msg.value);
+        _safeApprove(IERC20(address(weth)), address(swapRouter), msg.value);
         uint256 usdcOut = swapRouter.exactInputSingle(
             ISwapRouter02.ExactInputSingleParams({
                 tokenIn: address(weth),
@@ -88,6 +111,7 @@ contract SwapAndBurn {
             })
         );
         uint256 conduitFee = (usdcOut * FEE_BPS) / 10_000;
+        accruedFees += conduitFee;
         usdcBurned = usdcOut - conduitFee;
         _burn(usdcBurned, destinationDomain, mintRecipient, destinationCaller, maxFee, minFinalityThreshold, hookData);
         emit BurnInitiated(msg.sender, address(0), msg.value, usdcBurned, conduitFee, destinationDomain);
@@ -106,36 +130,47 @@ contract SwapAndBurn {
         uint256 maxFee,
         uint32 minFinalityThreshold,
         bytes calldata hookData
-    ) external returns (uint256 usdcBurned) {
+    ) external nonReentrant returns (uint256 usdcBurned) {
         if (amountIn == 0) revert NothingSent();
-        IERC20(tokenIn).transferFrom(msg.sender, address(this), amountIn);
+
+        // Measure what actually arrived rather than trusting `amountIn`, so a
+        // fee-on-transfer token can't make the contract try to swap more than
+        // it holds and dip into the fee treasury.
+        uint256 tokenBalanceBefore = IERC20(tokenIn).balanceOf(address(this));
+        _safeTransferFrom(IERC20(tokenIn), msg.sender, address(this), amountIn);
+        uint256 received = IERC20(tokenIn).balanceOf(address(this)) - tokenBalanceBefore;
+        if (received == 0) revert NothingSent();
 
         uint256 usdcOut;
         if (tokenIn == address(usdc)) {
-            usdcOut = amountIn;
+            usdcOut = received;
         } else {
-            IERC20(tokenIn).approve(address(swapRouter), amountIn);
+            _safeApprove(IERC20(tokenIn), address(swapRouter), received);
             usdcOut = swapRouter.exactInputSingle(
                 ISwapRouter02.ExactInputSingleParams({
                     tokenIn: tokenIn,
                     tokenOut: address(usdc),
                     fee: poolFee,
                     recipient: address(this),
-                    amountIn: amountIn,
+                    amountIn: received,
                     amountOutMinimum: minUsdcOut,
                     sqrtPriceLimitX96: 0
                 })
             );
         }
         uint256 conduitFee = (usdcOut * FEE_BPS) / 10_000;
+        accruedFees += conduitFee;
         usdcBurned = usdcOut - conduitFee;
         _burn(usdcBurned, destinationDomain, mintRecipient, destinationCaller, maxFee, minFinalityThreshold, hookData);
-        emit BurnInitiated(msg.sender, tokenIn, amountIn, usdcBurned, conduitFee, destinationDomain);
+        emit BurnInitiated(msg.sender, tokenIn, received, usdcBurned, conduitFee, destinationDomain);
     }
 
-    /// @notice Withdraw accumulated Conduit fees (USDC held by this contract).
+    /// @notice Withdraw accumulated Conduit fees. Capped at `accruedFees`, so
+    /// USDC that is mid-swap or was sent here by mistake is out of reach.
     function withdrawFees(address to, uint256 amount) external onlyOwner {
-        usdc.transfer(to, amount);
+        if (amount > accruedFees) revert AmountExceedsAccruedFees();
+        accruedFees -= amount;
+        _safeTransfer(usdc, to, amount);
         emit FeesWithdrawn(to, amount);
     }
 
@@ -150,7 +185,7 @@ contract SwapAndBurn {
     ) private {
         // A burn where the fast fee eats the whole amount mints nothing useful.
         if (usdcOut <= maxFee) revert UsdcBelowFee();
-        usdc.approve(address(tokenMessenger), usdcOut);
+        _safeApprove(usdc, address(tokenMessenger), usdcOut);
         tokenMessenger.depositForBurnWithHook(
             usdcOut,
             destinationDomain,
@@ -161,5 +196,24 @@ contract SwapAndBurn {
             minFinalityThreshold,
             hookData
         );
+    }
+
+    /// @dev The three helpers below tolerate both reverting and
+    /// `false`-returning ERC20s, and the non-standard ones returning nothing.
+    function _safeTransfer(IERC20 token, address to, uint256 amount) private {
+        _call(token, abi.encodeWithSelector(token.transfer.selector, to, amount));
+    }
+
+    function _safeTransferFrom(IERC20 token, address from, address to, uint256 amount) private {
+        _call(token, abi.encodeWithSelector(token.transferFrom.selector, from, to, amount));
+    }
+
+    function _safeApprove(IERC20 token, address spender, uint256 amount) private {
+        _call(token, abi.encodeWithSelector(token.approve.selector, spender, amount));
+    }
+
+    function _call(IERC20 token, bytes memory data) private {
+        (bool ok, bytes memory ret) = address(token).call(data);
+        if (!ok || (ret.length > 0 && !abi.decode(ret, (bool)))) revert TransferFailed();
     }
 }

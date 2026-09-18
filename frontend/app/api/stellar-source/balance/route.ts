@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
-import { rpc, Contract, Address, TransactionBuilder, Networks, BASE_FEE, scValToNative } from "@stellar/stellar-sdk";
+import { rpc, Contract, Address, StrKey, TransactionBuilder, BASE_FEE, scValToNative } from "@stellar/stellar-sdk";
 import { LEGS } from "@/lib/legs";
+import { rateLimit } from "@/lib/ratelimit";
+import { STELLAR_NETWORK_PASSPHRASE, STELLAR_RPC_URL } from "@/lib/stellarNetwork";
 
 /**
  * Reads a Stellar account's current USDC balance via a read-only Soroban
@@ -9,18 +11,23 @@ import { LEGS } from "@/lib/legs";
  * burn next, rather than trusting the pre-swap quote estimate (which can
  * differ slightly from the real output).
  */
-const RPC_URL = "https://soroban-testnet.stellar.org";
-
 export async function GET(req: NextRequest) {
+  if (!rateLimit(req, "stellar:balance", 60, 60_000)) {
+    return NextResponse.json({ error: "rate limited" }, { status: 429 });
+  }
+
   const publicKey = req.nextUrl.searchParams.get("publicKey");
   const source = LEGS.stellar;
-  if (!publicKey || !source?.stellarUsdc) {
-    return NextResponse.json({ error: "missing publicKey" }, { status: 400 });
+  if (!publicKey || !StrKey.isValidEd25519PublicKey(publicKey) || !source?.stellarUsdc) {
+    return NextResponse.json({ error: "missing or invalid publicKey" }, { status: 400 });
   }
   try {
-    const server = new rpc.Server(RPC_URL);
+    const server = new rpc.Server(STELLAR_RPC_URL);
     const account = await server.getAccount(publicKey);
-    const tx = new TransactionBuilder(account, { fee: BASE_FEE, networkPassphrase: Networks.TESTNET })
+    const tx = new TransactionBuilder(account, {
+      fee: BASE_FEE,
+      networkPassphrase: STELLAR_NETWORK_PASSPHRASE,
+    })
       .addOperation(new Contract(source.stellarUsdc).call("balance", new Address(publicKey).toScVal()))
       .setTimeout(30)
       .build();
@@ -29,9 +36,7 @@ export async function GET(req: NextRequest) {
     const balance = BigInt(scValToNative(sim.result!.retval));
     return NextResponse.json({ balance: balance.toString() });
   } catch (e) {
-    return NextResponse.json(
-      { error: e instanceof Error ? e.message : "balance read failed" },
-      { status: 502 }
-    );
+    console.error("stellar-source/balance failed", e);
+    return NextResponse.json({ error: "balance read failed" }, { status: 502 });
   }
 }
