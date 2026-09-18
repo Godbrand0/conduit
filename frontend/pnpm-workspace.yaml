@@ -1,3 +1,10 @@
+# Pin transitive dependencies with known advisories that their parents
+# (mainly @trezor/connect, via @creit.tech/stellar-wallets-kit) have not
+# yet updated: protobufjs arbitrary code execution, sharp/libheif.
+overrides:
+  protobufjs: '>=7.5.5'
+  sharp: '>=0.35.4'
+
 allowBuilds:
   '@reown/appkit': set this to true or false
   '@stellar/stellar-sdk': set this to true or false
