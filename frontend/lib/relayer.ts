@@ -5,12 +5,12 @@ import {
   rpc,
   Contract,
   TransactionBuilder,
-  Networks,
   Keypair,
-  BASE_FEE,
+  BASE_FEE, 
   nativeToScVal,
 } from "@stellar/stellar-sdk";
 import { LEGS, type Leg } from "./legs";
+import { STELLAR_NETWORK_PASSPHRASE } from "./stellarNetwork";
 import { getSwap, updateSwap } from "./db";
 
 const IRIS = "https://iris-api-sandbox.circle.com";
@@ -205,7 +205,7 @@ async function relayToStellar(burnTxHash: `0x${string}`, source: Leg, dest: Leg)
     const src = await server.getAccount(relayerKp.publicKey());
     const tx = new TransactionBuilder(src, {
       fee: (Number(BASE_FEE) * 100).toString(),
-      networkPassphrase: Networks.TESTNET,
+      networkPassphrase: STELLAR_NETWORK_PASSPHRASE,
     })
       .addOperation(contract.call(fn, ...args))
       .setTimeout(60)
@@ -238,9 +238,16 @@ async function relayToStellar(burnTxHash: `0x${string}`, source: Leg, dest: Leg)
       if (!alreadyHandled(detail)) throw new Error(`mint_and_forward failed: ${detail}`);
     }
 
+    // swap_and_deliver verifies Circle's attestation itself over these exact
+    // message bytes, so the attestation must be handed to it too — an earlier
+    // version passed only the message and the contract trusted an unverified
+    // buffer. `min_out` of 0 defers entirely to the floor carried inside the
+    // attested message: this relayer has no business choosing the user's
+    // slippage tolerance, and the contract takes the stricter of the two.
     const step2 = await invoke(dest.stellarSwapAndDeliver!, "swap_and_deliver", [
       nativeToScVal(messageBuf, { type: "bytes" }),
-      nativeToScVal(1n, { type: "i128" }), // min_out=1: testnet pool, arbitrary price
+      nativeToScVal(attestationBuf, { type: "bytes" }),
+      nativeToScVal(0n, { type: "i128" }),
     ]);
     // Persist the hash the moment it's known, before checking its final
     // status — a status-check failure below must not lose track of a

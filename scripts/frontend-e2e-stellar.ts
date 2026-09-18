@@ -34,6 +34,9 @@ const publicClient = createPublicClient({ chain: arbitrumSepolia, transport: htt
 const forwarderBytes32 = toHex(StrKey.decodeContract(STELLAR_CCTP_FORWARDER)) as `0x${string}`;
 const mintRecipientBytes32 = forwarderBytes32;
 const destinationCaller = forwarderBytes32;
+// Testnet pool price is arbitrary — floor at 1 stroop here. A real client
+// derives this from a live quote (useSwap.ts's applySlippage).
+const MIN_OUT_STROOPS = 1n;
 const circleRecipientAscii = stringToHex(STELLAR_SWAP_AND_DELIVER);
 const finalRecipientAscii = stringToHex(stellarRecipient);
 const hookData = concatHex([
@@ -43,6 +46,8 @@ const hookData = concatHex([
   circleRecipientAscii,
   numberToHex(stellarRecipient.length, { size: 4 }),
   finalRecipientAscii,
+  // Conduit's 16-byte BE minimum-output floor (stroops) — see useSwap.ts.
+  numberToHex(MIN_OUT_STROOPS, { size: 16 }),
 ]);
 
 console.log(`Burning 0.015 ETH on Arbitrum Sepolia -> Stellar XLM to ${stellarRecipient}`);

@@ -10,7 +10,7 @@ import {
   useWaitForTransactionReceipt,
   useWriteContract,
 } from "wagmi";
-import { BaseError, concatHex, encodeFunctionData, numberToHex, padHex, parseEther, parseUnits, stringToHex, toHex } from "viem";
+import { BaseError, concatHex, encodeFunctionData, numberToHex, padHex, parseEther, stringToHex, toHex } from "viem";
 import { encodeHook, TOKEN_MESSENGER_ABI, USDC_ABI } from "@cctp-sdk/core";
 import { StrKey } from "@stellar/stellar-sdk";
 import {
@@ -36,6 +36,25 @@ import { useStellarWallet } from "./useStellarWallet";
 
 const NATIVE_TO_USDC_SCALE = 1_000_000_000_000n; // 1e12: 18-decimal native <-> 6-decimal µUSDC
 
+/** Slippage tolerance applied to every swap leg, in basis points.
+ *
+ * Every floor in this file used to be a hardcoded placeholder — `1` on the
+ * destination hook and on the V2 source, and a flat `parseUnits("2", 6)` on
+ * the V3 source that had no relation to the amount being swapped. A user
+ * swapping 1 ETH was signing a transaction that accepted 2 USDC as a valid
+ * outcome. Both swaps are observable in the mempool (the destination floor
+ * even travels inside the public attested message), so those values made
+ * every route trivially sandwichable. Floors are now derived from the live
+ * quote, here and on the Stellar-source path. */
+export const SLIPPAGE_BPS = 100n; // 1%
+
+/** The minimum acceptable output for a quoted amount. */
+export function applySlippage(quoted: bigint): bigint {
+  const floor = (quoted * (10_000n - SLIPPAGE_BPS)) / 10_000n;
+  // Never return 0 for a non-zero quote — that would be no floor at all.
+  return floor > 0n ? floor : quoted > 0n ? 1n : 0n;
+}
+
 /** Real strkey validation (not a regex guess) — a well-formed Stellar
  * Ed25519 public key ("G..." address), the only kind of recipient this
  * phase accepts. */
@@ -51,7 +70,14 @@ export function isValidStellarRecipient(value: string): boolean {
  * Never called when `dest.isStellar` (that has its own byte layout, built
  * inline in `swap()` below).
  */
-function buildEvmDestHook(dest: Leg, address: `0x${string}`, raw: boolean) {
+function buildEvmDestHook(
+  dest: Leg,
+  address: `0x${string}`,
+  raw: boolean,
+  /** Minimum native output, in wei, the destination swap must deliver.
+   *  Travels inside the attested message, so the relayer cannot weaken it. */
+  minOutWei: bigint
+) {
   const rawDest = dest.nativeIsUsdc || raw;
   const mintRecipient = rawDest ? address : dest.executor!;
   const mintRecipientBytes32 = padHex(mintRecipient, { size: 32 });
@@ -65,12 +91,12 @@ function buildEvmDestHook(dest: Leg, address: `0x${string}`, raw: boolean) {
             ? encodeFunctionData({
                 abi: SWAP_USDC_TO_NATIVE_V2_ABI,
                 functionName: "swapUsdcToNative",
-                args: [0n, 1n, address],
+                args: [0n, minOutWei, address],
               })
             : encodeFunctionData({
                 abi: SWAP_USDC_TO_NATIVE_ABI,
                 functionName: "swapUsdcToNative",
-                args: [0n, dest.poolFee!, 1n, address],
+                args: [0n, dest.poolFee!, minOutWei, address],
               }),
         forwardAmount: 0n,
       });
@@ -552,7 +578,18 @@ export function useSwapFlow() {
 
     // Raw-USDC mode is never available with a Stellar source (see the
     // toggle's exclusion rule in SwapCard) — always swap-mode here.
-    const { hookData, mintRecipientBytes32, destinationCaller } = buildEvmDestHook(dest, address, false);
+    // The destination floor must be a real number derived from the live
+    // quote, and the quote must have loaded — signing with a placeholder
+    // floor is what made every route sandwichable.
+    if (quote.estimate === null) {
+      throw new Error("Still quoting the destination swap — try again in a moment");
+    }
+    const { hookData, mintRecipientBytes32, destinationCaller } = buildEvmDestHook(
+      dest,
+      address,
+      false,
+      applySlippage(quote.estimate)
+    );
     const sign = stellarWallet.signTransaction;
 
     // Trustline: a real Stellar ACCOUNT needs one for classic-asset-backed
@@ -621,7 +658,7 @@ export function useSwapFlow() {
     );
     setStellarSourceStep(null);
     return hash;
-  }, [address, amount, dest, from, maxFee, source, stellarWallet]);
+  }, [address, amount, dest, from, maxFee, source, stellarWallet, quote]);
 
   const swap = useCallback(async () => {
     setError(null);
@@ -633,6 +670,15 @@ export function useSwapFlow() {
       }
       if (insufficientFunds) {
         throw new Error("Amount exceeds your balance");
+      }
+      // Every slippage floor below is derived from these two. Refuse to sign
+      // anything while either is still loading rather than falling back to a
+      // placeholder floor.
+      if (usdcEstimate === null || quote.estimate === null) {
+        throw new Error("Still fetching a price quote — try again in a moment");
+      }
+      if (quote.tooSmall) {
+        throw new Error("Amount is too small to cover the transfer fees");
       }
 
       if (source.isStellar) {
@@ -699,9 +745,14 @@ export function useSwapFlow() {
         // mint_and_forward format) + Conduit's own trailing 4-byte BE
         // length + ascii final Stellar recipient (the real delivery
         // address, cryptographically bound inside the attested message so
-        // no one relaying it can redirect funds).
+        // no one relaying it can redirect funds) + Conduit's own 16-byte BE
+        // minimum-output floor in stroops. That last field exists so the
+        // user's slippage tolerance travels inside the attested message:
+        // swap_and_deliver's `min_out` argument is supplied by whoever
+        // relays, so on its own it protects nobody.
         const circleRecipientAscii = stringToHex(dest.stellarSwapAndDeliver!);
         const finalRecipientAscii = stringToHex(stellarRecipient);
+        const minOutStroops = applySlippage(quote.estimate) / XLM_TO_WEI_SCALE;
         hookData = concatHex([
           numberToHex(0, { size: 24 }), // reserved
           numberToHex(0, { size: 4 }), // version
@@ -709,13 +760,19 @@ export function useSwapFlow() {
           circleRecipientAscii,
           numberToHex(stellarRecipient.length, { size: 4 }),
           finalRecipientAscii,
+          numberToHex(minOutStroops, { size: 16 }),
         ]);
       } else {
-        // amountIn=0 (swap all minted USDC) / minOut=1 (testnet pools carry
-        // arbitrary prices; production quoting sets a real slippage floor)
-        // are baked into buildEvmDestHook, shared with the Stellar-source
-        // path above.
-        ({ mintRecipientBytes32, destinationCaller, hookData } = buildEvmDestHook(dest, address!, rawUsdcDest));
+        // amountIn=0 ("swap all minted USDC") is baked into buildEvmDestHook,
+        // shared with the Stellar-source path above; the minimum output is
+        // derived from the live quote and travels inside the attested
+        // message, so whoever relays it cannot weaken it.
+        ({ mintRecipientBytes32, destinationCaller, hookData } = buildEvmDestHook(
+          dest,
+          address!,
+          rawUsdcDest,
+          applySlippage(quote.estimate)
+        ));
       }
 
       let hash: `0x${string}`;
@@ -767,7 +824,15 @@ export function useSwapFlow() {
           address: source.swapAndBurn!,
           abi: SWAP_AND_BURN_V2_ABI,
           functionName: "swapAndBurnNative",
-          args: [1n, dest.domain, mintRecipientBytes32, destinationCaller, fee, 1000, hookData],
+          args: [
+            applySlippage(usdcEstimate),
+            dest.domain,
+            mintRecipientBytes32,
+            destinationCaller,
+            fee,
+            1000,
+            hookData,
+          ],
           value: parseEther(amount || "0"),
           chainId: source.chain!.id,
           ...gasOverride,
@@ -778,7 +843,7 @@ export function useSwapFlow() {
           abi: SWAP_AND_BURN_ABI,
           functionName: "swapAndBurnNative",
           args: [
-            parseUnits("2", 6),
+            applySlippage(usdcEstimate),
             source.poolFee!,
             dest.domain,
             mintRecipientBytes32,
@@ -821,6 +886,8 @@ export function useSwapFlow() {
     rawUsdcSource,
     rawUsdcDest,
     insufficientFunds,
+    usdcEstimate,
+    quote,
   ]);
 
   const busy =

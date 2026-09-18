@@ -57,6 +57,12 @@ const publicClient = createPublicClient({ chain: arbitrumSepolia, transport: htt
 // Conduit's own trailing field then further redirects to the final user. ---
 const cctpForwarderBytes32 =
   `0x${Buffer.from(StrKey.decodeContract(CCTP_FORWARDER)).toString("hex")}` as `0x${string}`;
+// Testnet pool carries an arbitrary price, so this script floors at 1
+// stroop. A real client derives this from a live quote (see useSwap.ts's
+// applySlippage); what matters here is that the field is present and the
+// contract reads its floor from the attested message, not from the caller.
+const MIN_OUT_STROOPS = 1n;
+
 const circleRecipientAscii = Buffer.from(SWAP_AND_DELIVER, "ascii"); // 56 bytes
 const reserved = Buffer.alloc(24, 0);
 const version = Buffer.alloc(4, 0);
@@ -67,6 +73,13 @@ const finalRecipientAscii = Buffer.from(FINAL_RECIPIENT_G, "ascii"); // 56 bytes
 const trailingLen = Buffer.alloc(4);
 trailingLen.writeUInt32BE(finalRecipientAscii.length);
 
+// Conduit's own 16-byte BE minimum-output floor (stroops), appended after
+// the recipient. swap_and_deliver reads its slippage floor from here rather
+// than from the relayer's argument, so the tolerance the user signed for
+// travels inside the attested message.
+const minOutStroops = Buffer.alloc(16);
+minOutStroops.writeBigUInt64BE(MIN_OUT_STROOPS, 8);
+
 const hookData = `0x${Buffer.concat([
   reserved,
   version,
@@ -74,6 +87,7 @@ const hookData = `0x${Buffer.concat([
   circleRecipientAscii,
   trailingLen,
   finalRecipientAscii,
+  minOutStroops,
 ]).toString("hex")}` as `0x${string}`;
 
 console.log(`Burning ETH on Arbitrum -> USDC -> Stellar (via swap_and_deliver) -> XLM to ${FINAL_RECIPIENT_G}`);
@@ -160,9 +174,13 @@ const finalBefore = await horizon.accounts().accountId(FINAL_RECIPIENT_G).call()
 const xlmBefore = Number(finalBefore.balances.find((b: any) => b.asset_type === "native")!.balance);
 
 console.log("[step 2] swap_and_deliver.swap_and_deliver…");
+// swap_and_deliver verifies Circle's attestation itself, so it needs the
+// attestation as well as the message; min_out=0 defers to the floor carried
+// inside the attested hookData above.
 const step2 = await invoke(SWAP_AND_DELIVER, "swap_and_deliver", [
   nativeToScVal(messageBuf, { type: "bytes" }),
-  nativeToScVal(1n, { type: "i128" }), // min_out=1: testnet pool, arbitrary price
+  nativeToScVal(attestationBuf, { type: "bytes" }),
+  nativeToScVal(0n, { type: "i128" }),
 ]);
 console.log(`  tx: ${step2.hash} status: ${step2.final.status}`);
 if (step2.final.status !== "SUCCESS") {
